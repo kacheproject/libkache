@@ -2,13 +2,15 @@ const std = @import("std");
 const autopkg = @import("autopkg/autopkg.zig");
 
 pub fn package(name: []const u8, path: []const u8) autopkg.AutoPkgI {
-    const sam3 = @import("sam3/build.zig");
+    var sam3 = @import("sam3/build.zig").package("sam3", "sam3");
+    var sqlite = @import("pkgs/sqlite.zig").package("sqlite", "pkgs/sqlite");
     return autopkg.genExport(autopkg.AutoPkg{
         .name = name,
         .path = path,
         .rootSrc = "src/kache.zig",
         .dependencies = &.{
-            autopkg.accept(sam3.package("sam3", "sam3")),
+            autopkg.accept(sam3),
+            autopkg.accept(sqlite),
         },
         .linkLibC = true,
     });
@@ -20,8 +22,8 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     var mainPackage = autopkg.accept(package("kache", "."));
+    defer mainPackage.deinit();
     var resolvedPackage = mainPackage.resolve(".", b.allocator) catch unreachable;
-    defer resolvedPackage.deinit();
     const lib = resolvedPackage.addBuild(b);
     lib.setBuildMode(mode);
     lib.install();

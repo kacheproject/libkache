@@ -2,7 +2,7 @@ const std = @import("std");
 const autopkg = @import("autopkg/autopkg.zig");
 
 pub fn package(name: []const u8, dirPath: []const u8) autopkg.AutoPkgI {
-    return autopkg.genExport(.{
+    return autopkg.genExport(autopkg.AutoPkg {
         .name = name,
         .path = dirPath,
         .rootSrc = "strings.zig",
