@@ -14,7 +14,8 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const mainPackage = autopkg.accept(package("strings", "."));
+    var mainPackage = autopkg.accept(package("strings", "."));
+    defer mainPackage.deinit();
     var resolvedPackage = mainPackage.resolve(".", b.allocator) catch unreachable;
     const lib = resolvedPackage.addBuild(b);
     lib.setBuildMode(mode);

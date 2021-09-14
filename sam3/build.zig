@@ -30,6 +30,7 @@ pub fn build(b: *std.build.Builder) void {
     const LIBSAM3_SRC = "./libsam3/src/libsam3/libsam3.c";
 
     var mainPackage = autopkg.accept(package("sam3", "."));
+    defer mainPackage.deinit();
     var resolvedPackage = mainPackage.resolve(".", b.allocator) catch unreachable;
     const lib = resolvedPackage.addBuild(b);
     lib.setBuildMode(mode);
