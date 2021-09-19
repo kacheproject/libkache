@@ -2,14 +2,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub fn equal(s1: []const u8, s2: []const u8) bool {
-    if (s1.len == s2.len){
-        for (s1) |c, i| {
-            if (c != s2[i]) return false;
-        }
-        return true;
-    } else {
-        return false;
+    for (s1) |c, i| {
+        if (i > s2.len or c != s2[i]) return false;
     }
+    return true;
 }
 
 test "equal" {
