@@ -5,6 +5,10 @@ const autopkg = @import("autopkg/autopkg.zig");
 
 
 pub fn package(name: []const u8, dirPath: []const u8) autopkg.AutoPkgI {
+    return selfPackage(name, dirPath, true);
+}
+
+fn selfPackage(name: []const u8, dirPath: []const u8, skipTest: bool) autopkg.AutoPkgI {
     const strings = @import("strings/build.zig");
     return autopkg.genExport(autopkg.AutoPkg {
         .name = name,
@@ -17,6 +21,7 @@ pub fn package(name: []const u8, dirPath: []const u8) autopkg.AutoPkgI {
         .cSrcFiles = &.{"./libsam3/src/libsam3/libsam3.c"},
         .includeDirs = &.{"./libsam3/src/libsam3"},
         .ccflags = &.{"-Wall", "-g", "-std=gnu99"},
+        .doNotTest = skipTest,
     });
 }
 
@@ -30,7 +35,7 @@ pub fn build(b: *std.build.Builder) void {
     const LIBSAM3_INCLUDE = "./libsam3/src/libsam3/";
     const LIBSAM3_SRC = "./libsam3/src/libsam3/libsam3.c";
 
-    var mainPackage = autopkg.accept(package("sam3", "."));
+    var mainPackage = autopkg.accept(selfPackage("sam3", ".", false));
     defer mainPackage.deinit();
     var resolvedPackage = mainPackage.resolve(".", b.allocator) catch unreachable;
     
