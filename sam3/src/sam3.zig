@@ -41,6 +41,8 @@ const Error = error {
     ReplyE,
     I2PE,
     CouldNotReachPeer,
+    BufferTooSmall,
+    InvalidData,
 } || Allocator.Error;
 
 fn translateError(estr: []const u8) Error {
@@ -57,6 +59,12 @@ fn translateError(estr: []const u8) Error {
         return Error.InvalidKey;
     } else if (equal("CANT_REACH_PEER", estr)) {
         return Error.CouldNotReachPeer;
+    } else if (equal("I2P_ERROR_SIZE", estr)) {
+        return Error.ReplyE;
+    } else if (equal("I2P_ERROR_BUFFER_TOO_SMALL", estr)) {
+        return Error.BufferTooSmall;
+    } else if (equal("INVALID_DATA", estr)) {
+        return Error.InvalidData;
     } else {
         if (std.builtin.mode == .Debug and c.libsam3_debug != 0) std.debug.print("unknown sam3 error: {s}\n", .{estr});
         return Error.Unknown;
@@ -101,6 +109,7 @@ const Session = struct {
 
     const Self = @This();
 
+    /// Initialise a sam3 session. Caller owns arguments and value.
     pub fn init(hostname: ?[]const u8, port: ?i32, privkey: ?[]const u8, sestype: SessionType, sigtype: SigType, params: ?[]const u8) Error!Self{
         var result = Self {.session = std.mem.zeroes(c.Sam3Session)};
         const stat = c.sam3CreateSession(
@@ -119,9 +128,9 @@ const Session = struct {
         }
     }
 
-    pub fn initSlient(hostname: ?[]const u8, port: ?i32, privkey: ?[]const u8, sestype: SessionType, sigtype: SigType, params: ?[]const u8) Error!Self{
+    pub fn initSilent(hostname: ?[]const u8, port: ?i32, privkey: ?[]const u8, sestype: SessionType, sigtype: SigType, params: ?[]const u8) Error!Self{
         var result = Self {.session = std.mem.zeroes(c.Sam3Session)};
-        const stat = c.sam3CreateSlientSession(
+        const stat = c.sam3CreateSilentSession(
             result.original(),
             if (hostname) |value| value.ptr else @ptrCast(?*const u8, c.SAM3_HOST_DEFAULT),
             if (port) |value| value else c.SAM3_PORT_DEFAULT,
@@ -168,6 +177,75 @@ const Session = struct {
 
     pub fn getError(self: *const Self) Error {
         return translateError(&@field(self.session, "error"));
+    }
+
+    /// The source's public key which last dgram packet come from.
+    pub fn destKey(self: *Self) [:0]u8 {
+        return @ptrCast([*]u8, &self.original().*.destkey)[0..616:0];
+    }
+
+    /// Send a dgram packet.
+    /// Possible errors:
+    /// - InvalidSessionType
+    /// - InvalidSession
+    /// - InvalidKey
+    /// - InvalidData
+    /// - IOE
+    pub fn dgramSend(self: *Self, destkey: [:0]const u8, buf: []const u8) Error!void {
+        if (std.builtin.mode == .Debug and c.libsam3_debug != 0) {
+            std.debug.print("sam3 dgramSend: [dest={s}] {s}\n", .{destkey, buf});
+        }
+        if (c.sam3DatagramSend(self.original(), destkey, buf.ptr, buf.len) < 0) {
+            return self.getError();
+        }
+    }
+
+    /// Receive a dgram packet.
+    /// Possible errors:
+    /// - InvalidSessionType
+    /// - InvalidSession
+    /// - InvalidKey
+    /// - IOE
+    /// - I2PE
+    /// - ReplyE
+    /// - BufferTooSmall
+    pub fn dgramReceive(self: *Self, buf: []u8) Error![]u8 {
+        std.debug.assert(buf.len >= 1);
+        const stat = c.sam3DatagramReceive(self.original(), buf.ptr, buf.len);
+        if (stat >= 0){
+            return buf[0..@bitCast(usize, stat)];
+        } else {
+            return self.getError();
+        }
+    }
+
+    /// Receive a dgram packet. The return slice have exact same size to the packet.
+    /// This method will made multiple calls to Alllocator and may fail while resizing memory.
+    /// Possible errors:
+    /// - InvalidSessionType
+    /// - InvalidSession
+    /// - InvalidKey
+    /// - IOE
+    /// - I2PE
+    /// - ReplyE
+    /// - BufferTooSmall
+    /// - OutOfMemory
+    pub fn dgramReceiveAlloc(self: *Self, alloc: *Allocator, maxsize: usize) Error![]u8 {
+        var buf = try alloc.alloc(u8, maxsize);
+        errdefer alloc.free(buf);
+        var realSizeSlice = try self.dgramReceive(buf);
+        if (buf.len != realSizeSlice.len) {
+            buf = try alloc.resize(buf, realSizeSlice.len);
+        }
+        return buf;
+    }
+
+    pub fn streamConnect(self: *Self, destkey: [:0]const u8) Error!Connection {
+        return Connection.streamConnect(self, destkey);
+    }
+
+    pub fn streamAccept(self: *Self) Error!Connection {
+        return Connection.streamAccept(self);
     }
 };
 
@@ -298,6 +376,45 @@ test "Integraded: work as stream" {
     var clientConn = try Connection.streamConnect(&clientSession, serverSession.publicKey());
     defer clientConn.close();
     var clientThread = try Thread.spawn(oneShotClient, &clientConn);
+    serverThread.wait();
+    clientThread.wait();
+}
+
+fn testDgramServer(ses: *Session) !void {
+    const _t = std.testing;
+    while (true) {
+        std.debug.print("testDgramServer: waiting\n", .{});
+        var data = try ses.dgramReceiveAlloc(_t.allocator, 1024);
+        std.debug.print("testDgramServer: received \"{s}\"\n", .{data});
+        defer _t.allocator.free(data);
+        if (strings.equal(data, "quit")) {
+            break;
+        }
+    }
+}
+
+fn testDgramClient(ses: *Session) !void {
+    try ses.dgramSend(ses.destKey(), "quit");
+}
+
+test "Integated: dgram works" {
+    const Thread = std.Thread;
+    const _t = std.testing;
+    setDebug(true);
+    defer setDebug(false);
+    const sessionConf = SessionConfig {
+        .inboundLength = 0,
+        .outboundLength = 0,
+    };
+    var optionStr = try sessionConf.getOptionsString(_t.allocator);
+    defer _t.allocator.free(optionStr);
+    var serverSession = try Session.init(null, null, null, .Dgram, SigType.recommended(), optionStr);
+    defer serverSession.close();
+    var serverThread = try Thread.spawn(testDgramServer, &serverSession);
+    var clientSession = try Session.init(null, null, null, .Dgram, SigType.recommended(), optionStr);
+    defer clientSession.close();
+    std.mem.copy(u8, clientSession.destKey(), serverSession.publicKey());
+    var clientThread = try Thread.spawn(testDgramClient, &clientSession);
     serverThread.wait();
     clientThread.wait();
 }
