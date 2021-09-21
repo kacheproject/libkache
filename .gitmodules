@@ -6,4 +6,4 @@
 	url = https://github.com/kacheproject/autopkg.git
 [submodule "pkgs/sqlite"]
 	path = pkgs/sqlite
-	url = https://github.com/vrischmann/zig-sqlite.git
+	url = https://github.com/kacheproject/zig-sqlite.git
