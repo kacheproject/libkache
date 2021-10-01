@@ -331,7 +331,7 @@ pub const Profile = struct {
         }
     }
 
-    fn setVault(self: *Self, name: []const u8, idStr: []const u8) !void {
+    fn setVault(self: *Self, name: []const u8, idStr: ?[]const u8) !void {
         try self.vaultNames.set(name, idStr);
     }
 };
@@ -414,8 +414,12 @@ pub const Vault = struct {
     }
 
     pub fn setName(self: *Self, name: []const u8) !void {
+        const possibleOldName = try self.lets.get("name");
         try self.lets.set("name", name);
         try self.profile.setVault(name, self.idStr);
+        if (possibleOldName) |oldName| {
+            try self.profile.setVault(name, null);
+        }
     }
 
     pub fn getId(self: *Self) !?[]const u8 {
@@ -440,4 +444,26 @@ test "Profile can create new vault" {
     var vaultAgain = try person.vault("test_vault");
     defer if (vaultAgain) |*v| v.deinit();
     try _t.expect(vaultAgain != null);
+}
+
+test "Profile.setName will set old name to null" {
+    const _t = std.testing;
+    var db = try createMemoryDatabase();
+    defer db.deinit();
+    var person = Profile.init(&db, _t.allocator);
+    defer person.deinit();
+    try person.ensure();
+    try person.setupEmpty("username", "example.org");
+    var vault = try person.vaultOrNew("test_vault");
+    defer vault.deinit();
+    try vault.setName("another_test_vault");
+    var noVault = try person.vault("test_vault");
+    try _t.expect(noVault == null);
+    var vaultAgain = try person.vault("another_test_vault");
+    defer if (vaultAgain) |*v| v.deinit();
+    try _t.expect(vaultAgain != null);
+    try _t.expectEqual(vault.getIdInt(), vaultAgain.?.getIdInt());
+    const newName = try vault.getName();
+    defer if(newName) |n| vault.free(n);
+    try _t.expectEqualStrings("another_test_vault", newName.?);
 }
