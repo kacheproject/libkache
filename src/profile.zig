@@ -9,8 +9,11 @@ const Allocator = std.mem.Allocator;
 const Error = error{
     Unknown,
     InvalidVersion,
+    ResourceExists,
 } || Allocator.Error;
 
+/// Key-value pair store on sqlite3.
+/// 0-length strings will be seen as null.
 const SqliteKV = struct {
     db: *sqlite.Db,
     name: []const u8,
@@ -27,10 +30,7 @@ const SqliteKV = struct {
     }
 
     pub fn ensure(self: *Self) Allocator.Error!void {
-        const query = std.fmt.allocPrintZ(
-            self.alloc,
-            "CREATE TABLE IF NOT EXISTS {s} (id INTEGER PRIMARY KEY, key TEXT, value TEXT, created_at INTEGER);",
-            .{self.name}) catch |e| switch (e) {
+        const query = std.fmt.allocPrintZ(self.alloc, "CREATE TABLE IF NOT EXISTS {s} (id INTEGER PRIMARY KEY, key TEXT, value TEXT, created_at INTEGER);", .{self.name}) catch |e| switch (e) {
             std.fmt.AllocPrintError.OutOfMemory => return @errSetCast(Allocator.Error, e),
             else => unreachable,
         };
@@ -49,10 +49,7 @@ const SqliteKV = struct {
     }
 
     pub fn getAlloc(self: *Self, k: []const u8, alloc: *Allocator) Allocator.Error!?[]const u8 {
-        const query = std.fmt.allocPrintZ(
-            self.alloc,
-            "SELECT value FROM {s} WHERE key = $key ORDER BY created_at DESC, id DESC LIMIT 1;",
-            .{self.name}) catch |e| switch (e) {
+        const query = std.fmt.allocPrintZ(self.alloc, "SELECT value FROM {s} WHERE key = $key ORDER BY created_at DESC, id DESC LIMIT 1;", .{self.name}) catch |e| switch (e) {
             error.OutOfMemory => return @errSetCast(Allocator.Error, e),
             else => unreachable,
         };
@@ -60,7 +57,16 @@ const SqliteKV = struct {
         var s = self.db.prepareDynamic(query) catch unreachable;
         defer s.deinit();
         var row = s.oneAlloc([]const u8, alloc, .{}, .{ .key = k }) catch unreachable;
-        return row;
+        if (row) |r| {
+            if (r.len != 0) {
+                return r;
+            } else {
+                defer alloc.free(r);
+                return null;
+            }
+        } else {
+            return null;
+        }
     }
 
     pub fn set(self: *Self, k: []const u8, v: ?[]const u8) Allocator.Error!void {
@@ -104,7 +110,7 @@ const SqliteKV = struct {
         const query = "SELECT 1 FROM sqlite_master WHERE type=? AND name=?;";
         var s = try self.db.prepare(query);
         defer s.deinit();
-        var value = try s.one(c_int, .{}, .{self.name, self.name});
+        var value = try s.one(c_int, .{}, .{ self.name, self.name });
         if (value) |val| {
             return val == 1;
         } else {
@@ -134,13 +140,10 @@ const SqliteKV = struct {
 };
 
 fn createMemoryDatabase() !sqlite.Db {
-    return try sqlite.Db.init(.{
-        .mode = .Memory,
-        .open_flags = .{
-            .write = true,
-            .create = true,
-        }
-    });
+    return try sqlite.Db.init(.{ .mode = .Memory, .open_flags = .{
+        .write = true,
+        .create = true,
+    } });
 }
 
 test "SqliteKV can get and set value" {
@@ -170,7 +173,7 @@ test "SqliteKV.keys return all keys in store" {
     const _t = std.testing;
     var db = try createMemoryDatabase();
     var kv = SqliteKV.init(&db, "test_table", _t.allocator);
-    const KEYS = .{"name0", "name1", "name2"};
+    const KEYS = .{ "name0", "name1", "name2" };
     try kv.ensure();
     inline for (KEYS) |k| {
         try kv.set(k, "value");
@@ -187,18 +190,31 @@ test "SqliteKV.setDetail can set created_at column" {
     const _t = std.testing;
     var db = try createMemoryDatabase();
     var kv = SqliteKV.init(&db, "test_table", _t.allocator);
-    const KEYS = .{"name0", "name2", "name3"};
+    const KEYS = .{ "name0", "name2", "name3" };
     try kv.ensure();
     inline for (KEYS) |k, i| {
-        try kv.setDetail(k, "value", 3-i);
+        try kv.setDetail(k, "value", 3 - i);
     }
     var keysInStore = try kv.keys();
     defer keysInStore.deinit();
     defer for (keysInStore.items) |k| kv.free(k);
-    const NEW_ORDER_KEYS = .{"name3", "name2", "name0"};
+    const NEW_ORDER_KEYS = .{ "name3", "name2", "name0" };
     inline for (NEW_ORDER_KEYS) |k, i| {
         try _t.expectEqualStrings(k, keysInStore.items[i]);
     }
+}
+
+test "SqliteKV.set can hide the value by set null" {
+    const _t = std.testing;
+    var db = try createMemoryDatabase();
+    defer db.deinit();
+    var kv = SqliteKV.init(&db, "test_table", _t.allocator);
+    try kv.ensure();
+    try kv.set("k", "v");
+    try kv.set("k", null);
+    const val = try kv.get("k");
+    defer if (val) |v| kv.free(v);
+    try _t.expect(val == null);
 }
 
 pub const Keys = enum {
@@ -226,7 +242,7 @@ pub const Profile = struct {
     const CURRENT_VERSION = @as(u32, 1);
 
     pub fn init(db: *sqlite.Db, alloc: *Allocator) Self {
-        return Self {
+        return Self{
             .db = db,
             .usrlets = SqliteKV.init(db, "usrlets", alloc),
             .syslets = SqliteKV.init(db, "syslets", alloc),
@@ -240,8 +256,7 @@ pub const Profile = struct {
         self.alloc.free(val);
     }
 
-    pub fn deinit(self: *Self) void {
-    }
+    pub fn deinit(self: *Self) void {}
 
     pub fn ensure(self: *Self) !void {
         if (try self.getVersion()) |version| {
@@ -268,7 +283,7 @@ pub const Profile = struct {
         try self.usrlets.ensure();
         try self.syslets.ensure();
         try self.vaultNames.ensure();
-        try self.setVersion(CURRENT_VERSION);
+        try self.setVersion(1);
     }
 
     pub fn setupEmpty(self: *Self, username: []const u8, host: []const u8) !void {
@@ -304,14 +319,7 @@ pub const Profile = struct {
     pub fn vault(self: *Self, name: []const u8) !?Vault {
         const idStr = try self.vaultNames.get(name);
         if (idStr) |idStrNonNull| {
-            return Vault.init(
-                self,
-                idStrNonNull,
-                try std.fmt.allocPrint(
-                    self.alloc,
-                    "vault_{s}",
-                    .{idStr}) catch |e| @errSetCast(Allocator.Error, e)
-            );
+            return Vault.init(self, idStrNonNull, try std.fmt.allocPrint(self.alloc, "vault_{s}", .{idStr}) catch |e| @errSetCast(Allocator.Error, e));
         } else {
             return null;
         }
@@ -333,6 +341,70 @@ pub const Profile = struct {
 
     fn setVault(self: *Self, name: []const u8, idStr: ?[]const u8) !void {
         try self.vaultNames.set(name, idStr);
+    }
+
+    pub fn device(self: *Self, idStr: []const u8) !?Device {
+        const idStrCopy = self.alloc.dupe(idStr);
+        errdefer self.alloc.free(idStrCopy);
+        const tableName = try std.fmt.allocPrint(self.alloc, "device_{s}", .{idStr}) catch |e| @errSetCast(Allocator.Error, e);
+        errdefer self.alloc.free(tableName);
+        var dev = Device.init(self, idStrCopy, tableName);
+        if (try dev.exists()) {
+            return dev;
+        } else {
+            self.alloc.free(idStrCopy);
+            self.alloc.free(tableName);
+            return null;
+        }
+    }
+
+    pub fn deviceByInt(self: *Self, id: u64) !?Device {
+        const idStr = try std.fmt.allocPrint(self.alloc, "{}", .{id}) catch |e| @errSetCast(Allocator.Error, e);
+        defer self.free(idStr);
+        return try self.device(id);
+    }
+
+    fn allDeviceTableNames(self: *Self) ![]const []const u8 {
+        const query = "SELECT name FROM sqlite_master WHERE name LIKE \"device!_%\" ESCAPE '!'";
+        var s = try self.db.prepare(query);
+        defer s.deinit();
+        return try s.all([]const u8, self.alloc, .{}, .{});
+    }
+
+    pub fn allDeviceIds(self: *Self) ![]u64 {
+        const tableNames = try self.allDeviceTableNames();
+        defer {
+            for (tableNames) |name| self.free(name);
+            self.free(tableNames);
+        }
+        var resultList = ArrayList(u64).init(self.alloc);
+        errdefer resultList.deinit();
+        for (tableNames) |name| {
+            const idStr = name[7..name.len];
+            const id = try std.fmt.parseInt(u64, idStr, 0);
+            try resultList.append(id);
+        }
+        return resultList.toOwnedSlice();
+    }
+
+    /// Caller owns `name`.
+    pub fn createDevice(self: *Self, name: []const u8) !Device {
+        const idStr = try std.fmt.allocPrint(
+            self.alloc,
+            "{}",
+            .{self.kssidGen.generate()},
+        ) catch |e| @errSetCast(Allocator.Error, e);
+        errdefer self.alloc.free(idStr);
+        const tableName = try std.fmt.allocPrint(
+            self.alloc,
+            "device_{s}",
+            .{idStr},
+        ) catch |e| @errSetCast(Allocator.Error, e);
+        errdefer self.alloc.free(tableName);
+        var dev = Device.init(self, idStr, tableName);
+        try dev.ensure();
+        try dev.setupEmpty(name);
+        return dev;
     }
 };
 
@@ -372,7 +444,7 @@ pub const Vault = struct {
     /// Initialise structure.
     /// Callee owns `idStr` and `tableName`, they should be allocated by `profile`'s allocator.
     fn init(profile: *Profile, idStr: []const u8, tableName: []const u8) Self {
-        return Self {
+        return Self{
             .profile = profile,
             .idStr = idStr,
             .tableName = tableName,
@@ -415,10 +487,11 @@ pub const Vault = struct {
 
     pub fn setName(self: *Self, name: []const u8) !void {
         const possibleOldName = try self.lets.get("name");
+        defer if (possibleOldName) |val| self.lets.free(val);
         try self.lets.set("name", name);
         try self.profile.setVault(name, self.idStr);
         if (possibleOldName) |oldName| {
-            try self.profile.setVault(name, null);
+            try self.profile.setVault(oldName, null);
         }
     }
 
@@ -458,12 +531,122 @@ test "Profile.setName will set old name to null" {
     defer vault.deinit();
     try vault.setName("another_test_vault");
     var noVault = try person.vault("test_vault");
+    defer if (noVault) |*v| v.deinit();
     try _t.expect(noVault == null);
     var vaultAgain = try person.vault("another_test_vault");
     defer if (vaultAgain) |*v| v.deinit();
     try _t.expect(vaultAgain != null);
     try _t.expectEqual(vault.getIdInt(), vaultAgain.?.getIdInt());
     const newName = try vault.getName();
-    defer if(newName) |n| vault.free(n);
+    defer if (newName) |n| vault.free(n);
     try _t.expectEqualStrings("another_test_vault", newName.?);
+}
+
+pub const Device = struct {
+    profile: *Profile,
+    idStr: []const u8,
+    lets: SqliteKV,
+    tableName: []const u8,
+
+    const Self = @This();
+
+    /// Initialise structure.
+    /// Callee owns `idStr` and `tableName`, they should be allocated by `profile`'s allocator.
+    fn init(profile: *Profile, idStr: []const u8, tableName: []const u8) Self {
+        return Self{
+            .profile = profile,
+            .idStr = idStr,
+            .tableName = tableName,
+            .lets = SqliteKV.init(profile.db, tableName, profile.alloc),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.free(self.idStr);
+        self.free(self.tableName);
+    }
+
+    pub fn free(self: *Self, val: anytype) void {
+        return self.profile.free(val);
+    }
+
+    pub fn exists(self: *Self) !bool {
+        return try self.lets.exists();
+    }
+
+    pub fn ensure(self: *Self) !void {
+        try self.lets.ensure();
+        if (try self.lets.get("id")) |id| {
+            defer self.free(id);
+            if (!std.mem.eql(u8, id, self.idStr)) {
+                return error.InvalidDatabase;
+            }
+        } else {
+            try self.lets.set("id", self.idStr);
+        }
+    }
+
+    pub fn setupEmpty(self: *Self, name: []const u8) !void {
+        try self.setName(name);
+    }
+
+    pub fn getName(self: *Self) !?[]const u8 {
+        return try self.lets.get("name");
+    }
+
+    pub fn setName(self: *Self, name: []const u8) !void {
+        try self.lets.set("name", name);
+    }
+
+    pub fn getId(self: *Self) !?[]const u8 {
+        return try self.profile.alloc.dupe(u8, self.idStr);
+    }
+
+    pub fn getIdInt(self: *Self) u64 {
+        return std.fmt.parseInt(u64, self.idStr, 0) catch unreachable;
+    }
+};
+
+test "Profile can create new device" {
+    const _t = std.testing;
+    var db = try createMemoryDatabase();
+    defer db.deinit();
+    var person = Profile.init(&db, _t.allocator);
+    defer person.deinit();
+    try person.ensure();
+    try person.setupEmpty("username", "example.org");
+    var dev = try person.createDevice("test_dev0");
+    defer dev.deinit();
+    try dev.ensure();
+}
+
+test "Profile can get all device ids" {
+    const _t = std.testing;
+    var db = try createMemoryDatabase();
+    defer db.deinit();
+    var person = Profile.init(&db, _t.allocator);
+    defer person.deinit();
+    try person.ensure();
+    try person.setupEmpty("username", "example.org");
+    var dev0 = try person.createDevice("dev0");
+    defer dev0.deinit();
+    try dev0.ensure();
+    var dev1 = try person.createDevice("dev1");
+    defer dev1.deinit();
+    try dev1.ensure();
+    const dev0Id = dev0.getIdInt();
+    const dev1Id = dev1.getIdInt();
+    const allIds = try person.allDeviceIds();
+    defer person.free(allIds);
+    var isIdExists = [_]bool {false, false};
+    for (allIds) |id| {
+        if (id == dev0Id) {
+            isIdExists[0] = true;
+        } else if (id == dev1Id) {
+            isIdExists[1] = true;
+        }
+    }
+    for (isIdExists) |b| {
+        try _t.expect(b);
+    }
 }
