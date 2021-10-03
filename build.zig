@@ -18,9 +18,6 @@ fn selfPackage(name: []const u8, path: []const u8, skipTest: bool) autopkg.AutoP
         },
         .linkLibC = true,
         .doNotTest = skipTest,
-        .testSrcs = &.{
-            "src/profile.zig",
-        },
     });
 }
 
