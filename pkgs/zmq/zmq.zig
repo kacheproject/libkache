@@ -661,21 +661,23 @@ pub fn Socket(comptime sockType: SocketType) type {
             return frame;
         }
 
-        /// Subscribe a topic. Only available on Sub/XSub sockets.
+        /// Subscribe a topic. Only available on Sub/XPub sockets.
+        /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
         pub fn subscribe(self: *Self, filter: []const u8) Error!void {
-            if (sockType == .Sub or sockType == .XSub) {
+            if (sockType == .Sub or sockType == .XPub) {
                 try self.raw.setOpt(.Subscribe, []const u8, filter);
             } else {
-                @compileError("subscribe() only available on Sub or XSub sockets");
+                @compileError("subscribe() only available on Sub or XPub sockets");
             }
         }
 
-        /// Unsubscribe a topic. Only available on Sub/XSub sockets.
+        /// Unsubscribe a topic. Only available on Sub/XPub sockets.
+        /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
         pub fn unsubscribe(self: *Self, filter: []const u8) Error!void {
             if (sockType == .Sub or sockType == .XSub) {
                 try self.raw.setOpt(.Unsubscribe, []const u8, filter);
             } else {
-                @compileError("unsubscribe() only available on Sub or XSub sockets");
+                @compileError("unsubscribe() only available on Sub or XPub sockets");
             }
         }
 
