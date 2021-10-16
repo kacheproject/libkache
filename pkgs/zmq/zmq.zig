@@ -143,6 +143,7 @@ pub const SockOpt = enum (c_int) {
     Unsubscribe = c.ZMQ_UNSUBSCRIBE,
     RcvMore = c.ZMQ_RCVMORE,
     UseFD = c.ZMQ_USE_FD,
+    LastEndpoint = c.ZMQ_LAST_ENDPOINT,
 
     const Self = @This();
 
@@ -669,6 +670,24 @@ pub fn Socket(comptime sockType: SocketType) type {
         /// Does not support authentication.
         pub fn setSocks5Proxy(self: *Self, address: [:0]const u8) Error!void {
             return try self.setOpt(.SocksProxy, [:0]const u8, address);
+        }
+
+        /// Retrieve the last endpoint set. Available for TCP or IPC transport.
+        pub fn getLastEndpointBuf(self: *Self, buf: []u8) Error![:0]const u8 {
+            var result = try self.getOptBuf(.LastEndpoint, buf);
+            return result[0..result.len-1:0];
+        }
+
+        /// Allocator version of `getLastEndpointBuf`.
+        pub fn getLastEndpointAlloc(self: *Self, alloc: *Allocator, maxsize: usize) (Allocator.Error||Error)![:0]const u8{
+            var result = try self.getOptAlloc(.LastEndpoint, alloc, maxsize);
+            return result[0..result.len-1:0];
+        }
+
+        // Auto allocator version of `getLastEndpointBuf`.
+        pub fn getLastEndpointAllocAuto(self: *Self, alloc: *Allocator) (Allocator.Error||Error)![:0]const u8{
+            var result = try self.getOptAllocAuto(.LastEndpoint, alloc);
+            return result[0..result.len-1:0];
         }
     };
 }
