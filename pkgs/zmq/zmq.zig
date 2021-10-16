@@ -142,6 +142,7 @@ pub const SockOpt = enum (c_int) {
     Subscribe = c.ZMQ_SUBSCRIBE,
     Unsubscribe = c.ZMQ_UNSUBSCRIBE,
     RcvMore = c.ZMQ_RCVMORE,
+    UseFD = c.ZMQ_USE_FD,
 
     const Self = @This();
 
@@ -360,6 +361,11 @@ pub const RawSocket = struct {
             .Unsubscribe => {
                 assert(valueT == []const u8 or valueT == []u8);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
+            },
+
+            .UseFD => {
+                assert(valueT == c_int);
+                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value, @sizeOf(c_int));
             },
             
             else => unreachable,
@@ -671,6 +677,15 @@ pub fn Socket(comptime sockType: SocketType) type {
             } else {
                 @compileError("unsubscribe() only available on Sub or XSub sockets");
             }
+        }
+
+        /// Set a pre-allocated socket file descriptor.
+        /// When set to a positive integer value before zmq_bind is called on the socket, the socket shall use the corresponding file descriptor for connections over TCP or IPC instead of allocating a new file descriptor. 
+        /// If set to -1 (default), a new file descriptor will be allocated instead.
+        /// NOTE: the file descriptor passed through MUST have been ran through the "bind" and "listen" system calls beforehand.
+        /// Also, socket option that would normally be passed through zmq_setsockopt like TCP buffers length, IP_TOS or SO_REUSEADDR MUST be set beforehand by the caller, as they must be set before the socket is bound.
+        pub fn setUseFD(self: *Self, fd: c_int) Error!void {
+            return try self.setOpt(.UseFD, c_int, fd);
         }
     };
 }
