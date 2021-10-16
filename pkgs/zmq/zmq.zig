@@ -664,6 +664,12 @@ pub fn Socket(comptime sockType: SocketType) type {
         pub fn setUseFD(self: *Self, fd: c_int) Error!void {
             return try self.setOpt(.UseFD, c_int, fd);
         }
+
+        /// Set the proxy of the socket. Only available for TCP transport.
+        /// Does not support authentication.
+        pub fn setSocks5Proxy(self: *Self, address: [:0]const u8) Error!void {
+            return try self.setOpt(.SocksProxy, [:0]const u8, address);
+        }
     };
 }
 
