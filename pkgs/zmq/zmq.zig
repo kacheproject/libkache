@@ -315,12 +315,7 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
             },
 
-            .Backlog => {
-                typeAssert(c_int, valueT);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
-            },
-
-            .BindToDevice => {
+            .BindToDevice, .SocksProxy => {
                 assert(valueT == [:0]const u8 or valueT == [:0]u8);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len+1);
             },
@@ -332,12 +327,7 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
             },
 
-            .ConnectTimeout => {
-                typeAssert(c_int, valueT);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
-            },
-
-            .Linger => {
+            .ConnectTimeout, .Linger, .UseFD, .Backlog => {
                 typeAssert(c_int, valueT);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
             },
@@ -348,24 +338,9 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &flag, @sizeOf(c_int));
             },
 
-            .SocksProxy => {
-                assert(valueT == [:0]const u8 or valueT == [:0]u8);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len+1);
-            },
-
-            .Subscribe => {
+            .Subscribe, .Unsubscribe => {
                 assert(valueT == []const u8 or valueT == []u8);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
-            },
-
-            .Unsubscribe => {
-                assert(valueT == []const u8 or valueT == []u8);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
-            },
-
-            .UseFD => {
-                assert(valueT == c_int);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value, @sizeOf(c_int));
             },
             
             else => unreachable,
