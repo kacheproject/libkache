@@ -342,7 +342,7 @@ pub const RawSocket = struct {
             },
 
             .ReqCorrelate => {
-                typeAssert(c_int, valueT);
+                typeAssert(bool, valueT);
                 const flag = @as(c_int, if (value) 1 else 0);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &flag, @sizeOf(c_int));
             },
@@ -442,6 +442,27 @@ pub const RawSocket = struct {
                 currentSize += 512;
                 buf = try alloc.realloc(buf, currentSize);
             }
+        }
+    }
+
+    pub fn sendFrame(self: *Self, frame: *Frame, flags: anytype) IOError!usize {
+        const iflags = buildFlags(flags);
+        const stat = c.zmq_msg_send(&frame.raw, self._sock, iflags);
+        if (stat >= 0) {
+            frame._beSentFlag = true;
+            return @intCast(usize, stat);
+        } else {
+            return getIOError();
+        }
+    }
+
+    pub fn recvFrame(self: *Self, frame: *Frame, flags: anytype) IOError!usize {
+        const iflags = buildFlags(flags);
+        const stat = c.zmq_msg_recv(&frame.raw, self._sock, iflags);
+        if (stat >= 0) {
+            return @intCast(usize, stat);
+        } else {
+            return getIOError();
         }
     }
 };
@@ -564,6 +585,15 @@ pub fn Socket(comptime sockType: SocketType) type {
             }
         }
 
+        /// Send a `Frame` and deinitialise.
+        pub fn sendFrame(self: *Self, frame: *Frame, flags: anytype) (IOError)!usize {
+            if (comptime canSend()) {
+                return try self.raw.sendFrame(frame, flags);
+            } else {
+                @compileError(std.fmt.comptimePrint("sendFrame() does not support by socket type {}", .{sockType}));
+            }
+        }
+
         /// Copy the value to heap and send the copy.
         /// Use `sendConstValue` to avoid coping for constants.
         pub fn sendValue(self: *Self, comptime V: type, value: *const V, flags: anytype) (Allocator.Error||IOError)!usize {
@@ -608,6 +638,21 @@ pub fn Socket(comptime sockType: SocketType) type {
             } else {
                 return null;
             }
+        }
+
+        pub fn recvFrame(self: *Self, frame: *Frame, flags: anytype) IOError!usize {
+            if (comptime canRecv()) {
+                return try self.raw.recvFrame(frame, flags);
+            } else {
+                @compileError(std.fmt.comptimePrint("recvFrame() does not support by socket type {}", .{sockType}));
+            }
+        }
+
+        pub fn recvFrameSize(self: *Self, size: usize, flags: anytype) (Allocator.Error||IOError)!Frame {
+            var frame = try Frame.initSize(size);
+            errdefer frame.deinit();
+            _ = try self.recvFrame(&frame, flags);
+            return frame;
         }
 
         /// Subscribe a topic. Only available on Sub/XSub sockets.
@@ -713,4 +758,257 @@ test "Socket: getOptBuf and getOptAlloc" {
     var id = try sock.getOptAlloc(.RoutingId, _t.allocator, 256);
     defer _t.allocator.free(id);
     try _t.expectEqualStrings(&ROUTINGID, id);
+}
+
+const FrameOpt = enum (c_int) {
+    More = c.ZMQ_MORE,
+    SrcFD = c.ZMQ_SRCFD,
+    Shared = c.ZMQ_SHARED,
+};
+
+const Frame = struct {
+    raw: c.zmq_msg_t,
+    _beSentFlag: bool = false,
+    _closed: bool = false,
+
+    const Self = @This();
+
+    pub fn init() Self {
+        var raw = std.mem.zeroes(c.zmq_msg_t);
+        const stat = c.zmq_msg_init(&raw);
+        return Self {
+            .raw = raw,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (!self._closed and !self._beSentFlag) {
+            _ = c.zmq_msg_close(&self.raw);
+        }
+        self._closed = true;
+    }
+
+    pub fn initSize(blksize: usize) Allocator.Error!Self {
+        var raw = std.mem.zeroes(c.zmq_msg_t);
+        const stat = c.zmq_msg_init_size(&raw, blksize);
+        if (stat >= 0) {
+            return Self {
+                .raw = raw,
+            };
+        } else {
+            return switch (getErrNo()) {
+                c.ENOMEM => Allocator.Error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+    }
+
+    pub fn initCopy(buf: []const u8) Allocator.Error!Self {
+        var frame = try Self.initSize(buf.len);
+        if (frame.data()) |d| {
+            std.mem.copy(u8, d, buf);
+        } else unreachable; // If initSize return without error, data should have value.
+        return frame;
+    }
+
+    // Rubicon: It's hard to implement zmq_init_data with zig's slices and allocators, so leave it alone.
+
+    pub fn size(self: *Self) usize {
+        return c.zmq_msg_size(&self.raw);
+    }
+
+    pub fn data(self: *Self) ?[]u8 {
+        var ptr = c.zmq_msg_data(&self.raw);
+        if (ptr) |nnptr| {
+            return @ptrCast([*]u8, nnptr)[0..self.size()];
+        } else {
+            return null;
+        }
+    }
+
+    pub fn getSocketType(self: *Self) [:0]const u8 {
+        if (@hasDecl(c, "ZMQ_MSG_PROPERTY_SOCKET_TYPE")) {
+            return self.getProperty(c.ZMQ_MSG_PROPERTY_SOCKET_TYPE) orelse unreachable;
+        } else {
+            return self.getProperty("Socket-Type") orelse unreachable;
+        }
+    }
+
+    /// Return routing ID for frame, if any.
+    /// The routing ID is set on all messages received from a ZMQ_SERVER socket.
+    /// To send a message to a ZMQ_SERVER socket you must set the routing ID of a connected ZMQ_CLIENT peer.
+    /// Routing IDs are transient.
+    pub fn getRoutingId(self: *Self) ?u32 {
+        const id = c.zmq_msg_routing_id(&self.raw);
+        if (id > 0){
+            return id;
+        } else {
+            return null;
+        }
+    }
+
+    /// Set routing ID property on message.
+    /// The `id` must be greater than zero.
+    /// To get a valid routing ID, you must receive a message from a ZMQ_SERVER socket, and use the `getRoutingId` method. 
+    pub fn setRoutingId(self: *Self, id: u32) void {
+        std.debug.assert(id != 0);
+        _ = c.zmq_msg_set_routing_id(&self.raw, id);
+    }
+
+    pub fn getPeerAddress(self: *Self) ?[:0]const u8 {
+        if (@hasDecl(c, "ZMQ_MSG_PROPERTY_PEER_ADDRESS")){
+            return self.getProperty(c.ZMQ_MSG_PROPERTY_PEER_ADDRESS);
+        } else {
+            return self.getProperty("Peer-Address");
+        }
+    }
+
+    pub fn getProperty(self: *Self, key: [:0]const u8) ?[:0]const u8 {
+        var ptr = c.zmq_msg_gets(&self.raw, key);
+        if (ptr) |nnptr| {
+            return nnptr[0..std.mem.len(nnptr):0];
+        } else {
+            return null;
+        }
+    }
+
+    pub fn getOpt(self: *Self, comptime T: type, comptime opt: FrameOpt) Error!T {
+        switch (opt) {
+            .More => {
+                if (T == bool) {
+                    const val = c.zmq_msg_get(&self.raw, @bitCast(c_int, opt));
+                    if (val != -1) {
+                        return val != 0;
+                    } else {
+                        return Error.Invalid;
+                    }
+                } else {
+                    @compileError(".More accepts bool as type");
+                }
+            },
+            
+            .SrcFD => {
+                if (T == c_int) {
+                    const val = c.zmq_msg_get(&self.raw, @bitCast(c_int, opt));
+                    if (val != -1) {
+                        return val;
+                    } else {
+                        return Error.Invalid;
+                    }
+                } else {
+                    @compileError(".SrcFD accepts c_int as type");
+                }
+            },
+
+            .Shared => {
+                if (T == bool) {
+                    const val = c.zmq_msg_get(&self.raw, @bitCast(c_int, opt));
+                    if (val != -1) {
+                        return val != 0;
+                    } else {
+                        return Error.Invalid;
+                    }
+                } else {
+                    @compileError(".Shared accepts bool as type");
+                }
+            },
+        }
+    }
+
+    pub fn setOpt(self: *Self, comptime T: type, opt: FrameOpt, val: T) Error!void {
+        _ = self; _ = T; _ = opt; _ = val;
+        @compileError("Currently setOpt does not support any property names");
+    }
+};
+
+test "Frame: initialise and deinitialise" {
+    const _t = std.testing;
+    {
+        var frame = Frame.init();
+        defer frame.deinit();
+    }
+
+    {
+        const DATA = "Hello World!";
+        var frame = try Frame.initSize(12);
+        defer frame.deinit();
+        var data = frame.data().?;
+        for (DATA) |ch, i| data[i] = ch;
+        try _t.expectEqualStrings(DATA, frame.data().?);
+    }
+}
+
+test "Frame: size" {
+    const _t = std.testing;
+    {
+        var frame = Frame.init();
+        defer frame.deinit();
+        try _t.expectEqual(@as(usize, 0), frame.size());
+    }
+    {
+        const DATA = "Hello Jack Cooper";
+        var frame = try Frame.initCopy(DATA);
+        defer frame.deinit();
+        try _t.expectEqual(@as(usize, 17), frame.size());
+    }
+}
+
+test "Frame: recv and send" {
+    const _t = std.testing;
+    {   
+        const DATA = "BT-7274";
+        var ctx = try Context.init();
+        defer ctx.deinit();
+        var sock0 = try ctx.socket(.Pair);
+        defer sock0.deinit();
+        var sock1 = try ctx.socket(.Pair);
+        defer sock1.deinit();
+        try sock0.bind("inproc://hello");
+        try sock1.connect("inproc://hello");
+
+        {
+            var frame = try Frame.initCopy(DATA);
+            defer frame.deinit();
+            _ = try sock0.sendFrame(&frame, .{});
+        }
+        {
+            var frame = try sock1.recvFrameSize(256, .{});
+            defer frame.deinit();
+            try _t.expectEqual(@as(usize, 7), frame.data().?.len);
+            try _t.expectEqual(@as(usize, 7), frame.size());
+            try _t.expectEqualStrings(DATA, frame.data().?);
+        }
+    }
+}
+
+test "Frame: getOpt" {
+    const _t = std.testing;
+    {   
+        const DATA = "BT-7274";
+        var ctx = try Context.init();
+        defer ctx.deinit();
+        var sock0 = try ctx.socket(.Pair);
+        defer sock0.deinit();
+        var sock1 = try ctx.socket(.Pair);
+        defer sock1.deinit();
+        try sock0.bind("inproc://hello");
+        try sock1.connect("inproc://hello");
+
+        {
+            var frame = try Frame.initCopy(DATA);
+            defer frame.deinit();
+            _ = try sock0.sendFrame(&frame, .{"more"});
+        }
+        {
+            var frame = try Frame.initCopy(DATA);
+            defer frame.deinit();
+            _ = try sock0.sendFrame(&frame, .{});
+        }
+        {
+            var frame = try sock1.recvFrameSize(256, .{});
+            defer frame.deinit();
+            try _t.expectEqual(true, try frame.getOpt(bool, .More));
+            (try sock1.recvFrameSize(256, .{})).deinit();
+        }
+    }
 }
