@@ -1,7 +1,8 @@
 const std = @import("std");
 const autopkg = @import("autopkg/autopkg.zig");
 
-pub fn package(name: []const u8, path: []const u8) autopkg.AutoPkgI {
+pub fn package(name: []const u8, path: []const u8, options: anytype) autopkg.AutoPkgI {
+    _ = options;
     return autopkg.genExport(.{
         .name = name,
         .path = path,
@@ -17,7 +18,7 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
 
-    var mainPackage = autopkg.accept(package("zmq", "."));
+    var mainPackage = autopkg.accept(package("zmq", ".", .{}));
     defer mainPackage.deinit();
     var resolvedPackage = mainPackage.resolve(".", b.allocator) catch unreachable;
     defer resolvedPackage.deinit();
