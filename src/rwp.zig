@@ -106,11 +106,11 @@ const Header = struct {
             iflags |= FLAG_LONG;
         }
 
-        return iflags;
+        return toPortableInt(u8, iflags);
     }
 
     pub fn parse(iflags: u8) Self {
-        const i = iflags;
+        const i = fromPortableInt(u8, iflags);
         return Self{
             .cmd = (i & FLAG_CMD) > 0,
             .more = (i & FLAG_MORE) > 0,
@@ -149,7 +149,7 @@ pub const FrameEncoder = struct {
     }
 
     fn getSizeByte64(self: *Self, i: u8) u8 {
-        return std.PackedIntArray(u64, 1).initAllTo(self.frame.data.len).sliceCast(u8).get(i);
+        return std.PackedIntArray(u64, 1).initAllTo(toPortableInt(u64, self.frame.data.len)).sliceCast(u8).get(i);
     }
 
     /// Return current byte.
@@ -192,7 +192,7 @@ pub const FrameEncoder = struct {
             return WriteBufError.InsufficientSize;
         }
         while (self.next()) |c| {
-            buf[self.currentIndexNE()] = c;
+            buf[self.currentIndex()] = c;
         }
         return buf[0..self.totalBytes];
     }
@@ -278,7 +278,7 @@ pub const FrameDecoder = struct {
                             var sizeSlice = std.PackedIntArray(u64, 1).initAllTo(self.size).sliceCast(u8);
                             sizeSlice.set(i - 1, c);
                             const sizePortable = sizeSlice.sliceCast(u64).get(0);
-                            self.size = sizePortable;
+                            self.size = if (i != 8) sizePortable else fromPortableInt(u64, sizePortable);
                         },
                         else => {
                             return false;
@@ -313,7 +313,6 @@ pub const FrameDecoder = struct {
 
     /// Reserve byte order in-place if it isn't in network order, decode frame and return the possible next frame position.
     pub fn decode(self: *Self, buf: []u8) Error!u64 {
-        enforceNetworkByteOrderInplace(buf);
         for (buf) |c| {
             if (!self.feed(c)) break;
         }
@@ -345,6 +344,12 @@ pub const Frame = struct {
             .header = std.mem.zeroes(Header),
             .data = undefined,
         };
+    }
+
+    pub fn parse(buf: []u8) FrameDecoder.Error!Self {
+        var frame = Self.initEmpty();
+        _ = try frame.getDecoder().decode(buf);
+        return frame;
     }
 
     fn getSizeFieldSize(self: *const Self) u64 {
@@ -402,12 +407,11 @@ test "FrameDecoder and FrameEncoder" {
         var wireData = try encoder.writeToBuf(&buf);
         var frame1 = Frame.initEmpty();
         var decoder = frame1.getDecoder();
-        for (wireData) |_, i| {
-            if (!decoder.feed(wireData[wireData.len-i-1])){
+        for (wireData) |c| {
+            if (!decoder.feed(c)){
                 break;
             }
         }
-        FrameDecoder.enforceNetworkByteOrderInplace(wireData);
         const fNextPos = try decoder.setBuffer(wireData);
         try _t.expectEqual(@as(u64, wireData.len), fNextPos);
         try _t.expectEqualStrings(DATA, frame1.data);
