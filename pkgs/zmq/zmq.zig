@@ -144,6 +144,10 @@ pub const SockOpt = enum (c_int) {
     RcvMore = c.ZMQ_RCVMORE,
     UseFD = c.ZMQ_USE_FD,
     LastEndpoint = c.ZMQ_LAST_ENDPOINT,
+    CurvePublicKey = c.ZMQ_CURVE_PUBLICKEY,
+    CurveSecretKey = c.ZMQ_CURVE_SECRETKEY,
+    CurveServer = c.ZMQ_CURVE_SERVER,
+    CurverServerKey = c.ZMQ_CURVE_SERVERKEY,
 
     const Self = @This();
 
@@ -305,6 +309,13 @@ pub const RawSocket = struct {
         }
     }
 
+    fn assertSliceOf(comptime childType: type, comptime realType: type) void {
+        const realInfo = @typeInfo(realType);
+        if (!(realInfo == .Pointer and realInfo.Pointer.size == .Slice and realInfo.Pointer.child == childType)) {
+            @compileError(std.fmt.comptimePrint("expect any slice of {}, got {}", .{childType, realType}));
+        }
+    }
+
 
     /// Set a socket option.
     pub fn setOpt(self: *Self, comptime opt: SockOpt, comptime valueT: type, value: valueT) Error!void {
@@ -333,7 +344,7 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
             },
 
-            .ReqCorrelate => {
+            .ReqCorrelate, .CurveServer => {
                 typeAssert(bool, valueT);
                 const flag = @as(c_int, if (value) 1 else 0);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &flag, @sizeOf(c_int));
@@ -343,8 +354,14 @@ pub const RawSocket = struct {
                 assert(valueT == []const u8 or valueT == []u8);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
             },
+
+            .CurvePublicKey, .CurverServerKey, .CurveSecretKey => {
+                assertSliceOf(u8, valueT);
+                assert(value.len == 32);
+                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
+            },
             
-            else => unreachable,
+            else => @compileError(std.fmt.comptimePrint("unsupported option: {}", .{opt})),
         }
         if (result >= 0) {
             return;
@@ -689,7 +706,85 @@ pub fn Socket(comptime sockType: SocketType) type {
             var result = try self.getOptAllocAuto(.LastEndpoint, alloc);
             return result[0..result.len-1:0];
         }
+
+        pub fn curveSetupClient(self: *Self, secretKey: []const u8) Error!void {
+            var pubK = curvePublic(secretKey);
+            try self.setOpt(.CurveServer, bool, false);
+            try self.setOpt(.CurveSecretKey, []const u8, secretKey);
+            try self.setOpt(.CurvePublicKey, []const u8, &pubK);
+        }
+
+        pub fn curveClientSetServer(self: *Self, serverPublicKey: []const u8) Error!void {
+            try self.setOpt(.CurverServerKey, []const u8, serverPublicKey);
+        }
+
+        pub fn curveSetupServer(self: *Self, secretKey: []const u8) Error!void {
+            var pubK = curvePublic(secretKey);
+            try self.setOpt(.CurveServer, bool, true);
+            try self.setOpt(.CurveSecretKey, []const u8, secretKey);
+            try self.setOpt(.CurvePublicKey, []const u8, &pubK);
+        }
     };
+}
+
+pub fn curvePublic(secretKey: []const u8) [32]u8 {
+    std.debug.assert(secretKey.len == 32);
+    var z85Buf: [41]u8 = undefined;
+    var z85PubBuf: [41]u8 = undefined;
+    if (c.zmq_z85_encode(&z85Buf, secretKey.ptr, 32)) |_| {
+        if (c.zmq_curve_public(&z85PubBuf, &z85Buf) != c.ENOTSUP) {
+            var pubKBuf: [32]u8 = undefined;
+            if (c.zmq_z85_decode(&pubKBuf, &z85PubBuf)) |_| {
+                return pubKBuf;
+            } else unreachable;
+        } else unreachable; // libzmq not built with crypto support
+    } else unreachable;
+}
+
+pub fn curveGenerateSecretKey() [32]u8 {
+    var secK: [41]u8 = undefined;
+    var pubK: [41]u8 = undefined;
+
+    if (c.zmq_curve_keypair(&pubK, &secK) != c.ENOTSUP) {
+        var pubKBin: [32]u8 = undefined;
+        if (c.zmq_z85_decode(&pubKBin, &pubK)) |_| {
+            return pubKBin;
+        } else unreachable;
+    } else unreachable;
+}
+
+fn comptimeHexToBytes(comptime s: []const u8, comptime binLength: usize) *const [binLength]u8 {
+    comptime {
+        var buf: [binLength]u8 = undefined;
+        var slice = std.fmt.hexToBytes(&buf, s) catch unreachable;
+        if (slice.len != binLength) @compileError("internal error");
+        return &buf;
+    }
+}
+
+pub const TEST_CLIENT_PUBKEY = comptimeHexToBytes("BB88471D65E2659B30C55A5321CEBB5AAB2B70A398645C26DCA2B2FCB43FC518", 32);
+pub const TEST_CLIENT_SECKEY = comptimeHexToBytes("7BB864B489AFA3671FBE69101F94B38972F24816DFB01B51656B3FEC8DFD0888", 32);
+pub const TEST_SERVER_PUBKEY = comptimeHexToBytes("54FCBA24E93249969316FB617C872BB0C1D1FF14800427C594CBFACF1BC2D652", 32);
+pub const TEST_SERVER_SECKEY = comptimeHexToBytes("8E0BDD697628B91D8F245587EE95C5B04D48963F79259877B49CD9063AEAD3B7", 32);
+
+test "curvePublic and TEST_*_*KEY" {
+    const _t = std.testing;
+    {
+        var pubKey = curvePublic(TEST_CLIENT_SECKEY);
+        try _t.expectEqualSlices(u8, TEST_CLIENT_PUBKEY, &pubKey);
+    }
+    {
+        var pubKey = curvePublic(TEST_SERVER_SECKEY);
+        try _t.expectEqualSlices(u8, TEST_SERVER_PUBKEY, &pubKey);
+    }
+}
+
+test "curveGenerateSecretKey" {
+    const _t = std.testing;
+    {
+        var key0 = curveGenerateSecretKey();
+        var pk0 = curvePublic(&key0);
+    }
 }
 
 test "Socket: initialise and deinitialise" {
@@ -775,6 +870,35 @@ test "Socket: getOptBuf and getOptAlloc" {
     var id = try sock.getOptAlloc(.RoutingId, _t.allocator, 256);
     defer _t.allocator.free(id);
     try _t.expectEqualStrings(&ROUTINGID, id);
+}
+
+test "Socket: CurveZMQ" {
+    const _t = std.testing;
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Rep);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Req);
+    defer sock1.deinit();
+    // Setup CurveZMQ (only affect connection after set up)
+    try sock0.curveSetupServer(TEST_SERVER_SECKEY);
+    try sock1.curveSetupClient(TEST_CLIENT_SECKEY);
+    // Setup end
+    try sock0.bind("tcp://127.0.0.1:*");
+    const sock0Address = try sock0.getLastEndpointAlloc(_t.allocator, 256);
+    defer _t.allocator.free(sock0Address);
+    try sock1.curveClientSetServer(TEST_SERVER_PUBKEY);
+    try sock1.connect(sock0Address);
+
+    _ = try sock1.sendConst("PING", .{});
+    var result = try sock0.recvAlloc(_t.allocator, 64, .{});
+    defer _t.allocator.free(result);
+    try _t.expectEqualStrings("PING", result);
+    _ = try sock0.sendConst("PONG", .{});
+
+    var result1 = try sock1.recvAlloc(_t.allocator, 64, .{});
+    defer _t.allocator.free(result1);
+    try _t.expectEqualStrings("PONG", result1);
 }
 
 const FrameOpt = enum (c_int) {
