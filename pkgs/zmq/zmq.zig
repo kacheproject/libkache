@@ -724,6 +724,13 @@ pub fn Socket(comptime sockType: SocketType) type {
             try self.setOpt(.CurveSecretKey, []const u8, secretKey);
             try self.setOpt(.CurvePublicKey, []const u8, &pubK);
         }
+
+        /// Return true if the message part last received from the socket was a data part with more parts to follow.
+        /// If there are no data parts to follow, this option shall return false.
+        /// Undefined behaviour will be triggered if being called without any message part received before.
+        pub fn getRcvMore(self: *Self) bool {
+            return self.getOpt(bool, .RcvMore) catch unreachable;
+        }
     };
 }
 
@@ -899,6 +906,23 @@ test "Socket: CurveZMQ" {
     var result1 = try sock1.recvAlloc(_t.allocator, 64, .{});
     defer _t.allocator.free(result1);
     try _t.expectEqualStrings("PONG", result1);
+}
+
+test "Socket: getRcvMore" {
+    const _t = std.testing;
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Pair);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Pair);
+    defer sock1.deinit();
+    try sock0.bind("inproc://test");
+    try sock1.connect("inproc://test");
+    _ = try sock0.sendConst("Hello", .{"more"});
+    _ = try sock0.sendConst("", .{});
+    var buf: [256]u8 = undefined;
+    _ = try sock1.recv(&buf, .{});
+    try _t.expect(sock1.getRcvMore());
 }
 
 const FrameOpt = enum (c_int) {
