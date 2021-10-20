@@ -683,6 +683,15 @@ pub const Socket = struct {
     pub fn getRcvMore(self: *Self) bool {
         return self.getOpt(bool, .RcvMore) catch unreachable;
     }
+
+    /// Ignore next incoming message part.
+    pub fn recvIgnore(self: *Self, flags: anytype) IOError!void {
+        var buf: [1]u8 = undefined;
+        _ = self.recv(&buf, flags) catch |e| switch (e) {
+            IOError.FrameTooLarge => {},
+            else => return e,
+        };
+    }
 };
 
 pub fn curvePublic(secretKey: []const u8) [32]u8 {
@@ -765,6 +774,25 @@ test "Socket: send and recv" {
     try sock0.bind("inproc://test");
     try sock1.connect("inproc://test");
     _ = try sock0.sendConst(DATA, .{});
+    var receivedData = try sock1.recvAlloc(_t.allocator, 256, .{});
+    defer _t.allocator.free(receivedData);
+    try _t.expectEqualStrings(DATA, receivedData);
+}
+
+test "Socket: recvIgnore" {
+    const _t = std.testing;
+    const DATA = "Hello Zig from ZeroMQ";
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Pair);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Pair);
+    defer sock1.deinit();
+    try sock0.bind("inproc://test");
+    try sock1.connect("inproc://test");
+    _ = try sock0.sendConst("HELLO", .{});
+    _ = try sock0.sendConst(DATA, .{});
+    try sock1.recvIgnore(.{});
     var receivedData = try sock1.recvAlloc(_t.allocator, 256, .{});
     defer _t.allocator.free(receivedData);
     try _t.expectEqualStrings(DATA, receivedData);
