@@ -9,11 +9,13 @@ const VecClock = struct {
 
     const Self = @This();
 
-    pub fn init(myid: u64, alloc: *Allocator) Allocator.Error!Self {
-        return Self {
+    pub fn init(myid: u64, initialClk: u64, alloc: *Allocator) Allocator.Error!Self {
+        var result = Self {
             .vec = HashMap(u64, u64, std.hash_map.AutoContext(u64), 0.8).init(alloc),
             .myid = myid,
         };
+        try result.vec.put(myid, initialClk);
+        return result;
     }
 
     pub fn canBeUpdated(self: *Self, k: u64, clk: u64) bool {
@@ -47,41 +49,10 @@ const VecClock = struct {
         }
     }
 
-    pub fn increment(self: *Self, offest: u64) Allocator.Error!void {
-        var oldVal = self.vec.get(self.myid);
-        var val = if (oldVal) |old| old + offest else offest;
-        try self.vec.put(val);
-    }
-
-    pub fn send(self: *Self, alloc: *Allocator) Allocator.Error![]u8 {
-        var len = self.vec.count();
-        var buf = try alloc.alloc(u64, len*2);
-        var currslot = 0;
-        for (self.vec.keyIterator()) |k| {
-            var val = self.vec.get(k).?;
-            buf[currslot] = k;
-            buf[currslot+1] = val;
-            currslot += 2;
-        }
-        return buf;
-    }
-
-    pub fn recv(self: *Self, buf: []u8) bool {
-        for (buf) |val, i| {
-            if (i % 2 == 1) {
-                var k = buf[i-1];
-                if (!self.canBeUpdated(k, val)) {
-                    return false;
-                }
-            }
-        }
-
-        for (buf) |val, i| {
-            if (i % 2 == 1) {
-                var k = buf[i-1];
-                self.update(k, val);
-            }
-        }
-        return true;
+    pub fn increment(self: *Self, offest: u64) void {
+        var oldVal = self.vec.get(self.myid).?;
+        var val = oldVal + offest;
+        self.vec.put(val) catch unreachable; // the key-value pair have been exists
+        return val;
     }
 };
