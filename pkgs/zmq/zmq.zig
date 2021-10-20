@@ -904,13 +904,13 @@ test "Socket: getRcvMore" {
     try _t.expect(sock1.getRcvMore());
 }
 
-const FrameOpt = enum(c_int) {
+pub const FrameOpt = enum(c_int) {
     More = c.ZMQ_MORE,
     SrcFD = c.ZMQ_SRCFD,
     Shared = c.ZMQ_SHARED,
 };
 
-const Frame = struct {
+pub const Frame = struct {
     raw: c.zmq_msg_t,
     _beSentFlag: bool = false,
     _closed: bool = false,
