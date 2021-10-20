@@ -8,7 +8,7 @@ const c = @cImport({
 pub const SNDMORE = c.ZMQ_SNDMORE;
 pub const DONTWAIT = c.ZMQ_DONTWAIT;
 
-pub const SocketType = enum (c_int) {
+pub const SocketType = enum(c_int) {
     Req = c.ZMQ_REQ,
     Rep = c.ZMQ_REP,
     Router = c.ZMQ_ROUTER,
@@ -22,7 +22,7 @@ pub const SocketType = enum (c_int) {
     Push = c.ZMQ_PUSH,
 };
 
-pub const Error = error {
+pub const Error = error{
     Unknown,
     Invalid,
     Interrupted,
@@ -32,7 +32,7 @@ pub const Error = error {
     TooManyFiles,
 };
 
-pub const IOError = error {
+pub const IOError = error{
     Again,
     NotSupported,
     NoMultipart,
@@ -44,7 +44,7 @@ pub const IOError = error {
     FrameTooLarge,
 };
 
-pub const FileError = error {
+pub const FileError = error{
     InvalidEndpoint,
     NotSupportedProtocol,
     IncompatiableProtocol,
@@ -83,7 +83,7 @@ pub const Context = struct {
     pub fn init() Error!Self {
         var zctx = c.zmq_ctx_new();
         if (zctx) |ctx| {
-            return Self {
+            return Self{
                 ._ctx = ctx,
             };
         } else {
@@ -107,10 +107,10 @@ pub const Context = struct {
         };
     }
 
-    pub fn socket(self: *Self, comptime typ: SocketType) Error!Socket(typ) {
+    pub fn socket(self: *Self, comptime typ: SocketType) Error!Socket {
         var sock = c.zmq_socket(self._ctx, @bitCast(c_int, typ));
         if (sock) |realSock| {
-            return Socket(typ).init(RawSocket.init(realSock));
+            return Socket.init(RawSocket.init(realSock));
         } else {
             return switch (getErrNo()) {
                 c.EINVAL => Error.Invalid,
@@ -129,13 +129,13 @@ test "Context: initialise and deinitialise" {
     ctx.deinit();
 }
 
-pub const SockOpt = enum (c_int) {
+pub const SockOpt = enum(c_int) {
     Affinity = c.ZMQ_AFFINITY,
     Backlog = c.ZMQ_BACKLOG,
     BindToDevice = c.ZMQ_BINDTODEVICE,
     RoutingId = c.ZMQ_ROUTING_ID,
     ConnectRoutingId = c.ZMQ_CONNECT_ROUTING_ID,
-    ConnectTimeout =c.ZMQ_CONNECT_TIMEOUT,
+    ConnectTimeout = c.ZMQ_CONNECT_TIMEOUT,
     Linger = c.ZMQ_LINGER,
     ReqCorrelate = c.ZMQ_REQ_CORRELATE,
     SocksProxy = c.ZMQ_SOCKS_PROXY,
@@ -154,7 +154,7 @@ pub const SockOpt = enum (c_int) {
     pub fn getOriginal(self: *const Self) c_int {
         return @bitCast(c_int, self.*);
     }
-}; 
+};
 
 pub const RawSocket = struct {
     _sock: *c_void,
@@ -162,7 +162,7 @@ pub const RawSocket = struct {
     const Self = @This();
 
     fn init(sock: *c_void) Self {
-        return Self {
+        return Self{
             ._sock = sock,
         };
     }
@@ -198,7 +198,7 @@ pub const RawSocket = struct {
             }
 
             return iflags;
-        } else if (infoT == .Int or infoT == .ComptimeInt){
+        } else if (infoT == .Int or infoT == .ComptimeInt) {
             return @intCast(c_int, flags);
         } else {
             @compileError(std.fmt.comptimePrint("expect tuple or integer, got {}", .{T}));
@@ -305,17 +305,16 @@ pub const RawSocket = struct {
 
     fn typeAssert(comptime expected: type, comptime real: type) void {
         if (expected != real) {
-            @compileError(std.fmt.comptimePrint("expect {}, got {}", .{expected, real}));
+            @compileError(std.fmt.comptimePrint("expect {}, got {}", .{ expected, real }));
         }
     }
 
     fn assertSliceOf(comptime childType: type, comptime realType: type) void {
         const realInfo = @typeInfo(realType);
         if (!(realInfo == .Pointer and realInfo.Pointer.size == .Slice and realInfo.Pointer.child == childType)) {
-            @compileError(std.fmt.comptimePrint("expect any slice of {}, got {}", .{childType, realType}));
+            @compileError(std.fmt.comptimePrint("expect any slice of {}, got {}", .{ childType, realType }));
         }
     }
-
 
     /// Set a socket option.
     pub fn setOpt(self: *Self, comptime opt: SockOpt, comptime valueT: type, value: valueT) Error!void {
@@ -329,7 +328,7 @@ pub const RawSocket = struct {
 
             .BindToDevice, .SocksProxy => {
                 assert(valueT == [:0]const u8 or valueT == [:0]u8);
-                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len+1);
+                result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len + 1);
             },
 
             .ConnectRoutingId, .RoutingId => {
@@ -360,7 +359,7 @@ pub const RawSocket = struct {
                 assert(value.len == 32);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
             },
-            
+
             else => @compileError(std.fmt.comptimePrint("unsupported option: {}", .{opt})),
         }
         if (result >= 0) {
@@ -414,7 +413,7 @@ pub const RawSocket = struct {
     }
 
     /// Allocate `maxsize` bytes memory, read the value of a socket option into it, and resize it to best-fit.
-    pub fn getOptAlloc(self: *Self, opt: SockOpt, alloc: *Allocator, maxsize: usize) (Allocator.Error||Error)![]u8 {
+    pub fn getOptAlloc(self: *Self, opt: SockOpt, alloc: *Allocator, maxsize: usize) (Allocator.Error || Error)![]u8 {
         var buf = try alloc.alloc(u8, maxsize);
         errdefer alloc.free(buf);
         var resultBuf = try self.getOptBuf(opt, buf);
@@ -466,273 +465,225 @@ pub const RawSocket = struct {
     }
 };
 
-pub fn Socket(comptime sockType: SocketType) type {
-    return struct {
-        raw: RawSocket,
+pub const Socket = struct {
+    raw: RawSocket,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn init(raw: RawSocket) Self {
-            return Self {
-                .raw = raw,
-            };
-        }
+    pub fn init(raw: RawSocket) Self {
+        return Self{
+            .raw = raw,
+        };
+    }
 
-        /// Close socket.
-        pub fn close(self: *Self) void {
-            self.raw.close();
-        }
+    /// Close socket.
+    pub fn close(self: *Self) void {
+        self.raw.close();
+    }
 
-        /// Set socket's linger.
-        /// If linger is 0, the socket will block when is being closing until all messages sent.
-        /// When it's -1, the socket will be close but all queued messages will be kept (context will block when terminating if messages not sent).
-        /// For any integer is greater than 0, it will be treated as the milliseconds before all messages timeout and the socket closed.
-        pub fn setLinger(self: *Self, linger: c_int) Error!void {
-            try self.setOpt(.Linger, c_int, linger);
-        }
+    /// Set socket's linger.
+    /// If linger is 0, the socket will block when is being closing until all messages sent.
+    /// When it's -1, the socket will be close but all queued messages will be kept (context will block when terminating if messages not sent).
+    /// For any integer is greater than 0, it will be treated as the milliseconds before all messages timeout and the socket closed.
+    pub fn setLinger(self: *Self, linger: c_int) Error!void {
+        try self.setOpt(.Linger, c_int, linger);
+    }
 
-        /// Close socket and deinitialise structure.
-        pub fn deinit(self: *Self) void {
-            self.raw.close();
-        }
+    /// Close socket and deinitialise structure.
+    pub fn deinit(self: *Self) void {
+        self.raw.close();
+    }
 
-        fn canSend() bool {
-            return switch (sockType) {
-                .Sub, .XSub => false,
-                .Pull => false,
-                else => true,
-            };
-        }
+    /// Get the value of a socket option.
+    pub fn getOpt(self: *Self, comptime T: type, opt: SockOpt) Error!T {
+        return try self.raw.getOpt(T, opt);
+    }
 
-        fn canRecv() bool {
-            return switch (sockType) {
-                .Pub, .XPub => false,
-                .Push => false,
-                else => true,
-            };
-        }
-
-        /// Get the value of a socket option.
-        pub fn getOpt(self: *Self, comptime T: type, opt: SockOpt) Error!T {
-            return try self.raw.getOpt(T, opt);
-        }
-
-        /// Read the value of a socket option to `buf`.
+    /// Read the value of a socket option to `buf`.
+    /// If the option name is unavailable or the `buf` have not enough size, `Error.Invalid` will be returned. 
         /// If the option name is unavailable or the `buf` have not enough size, `Error.Invalid` will be returned. 
-        pub fn getOptBuf(self: *Self, opt: SockOpt, buf: []u8) Error![]u8 {
-            return try self.raw.getOptBuf(opt, buf);
-        }
+    /// If the option name is unavailable or the `buf` have not enough size, `Error.Invalid` will be returned. 
+    pub fn getOptBuf(self: *Self, opt: SockOpt, buf: []u8) Error![]u8 {
+        return try self.raw.getOptBuf(opt, buf);
+    }
 
-        /// Allocate `maxsize` bytes memory, read the value of a socket option into it, and resize it to best-fit.
-        pub fn getOptAlloc(self: *Self, opt: SockOpt, alloc: *Allocator, maxsize: usize) (Allocator.Error||Error)![]u8 {
-            return try self.raw.getOptAlloc(opt, alloc, maxsize);
-        }
+    /// Allocate `maxsize` bytes memory, read the value of a socket option into it, and resize it to best-fit.
+    pub fn getOptAlloc(self: *Self, opt: SockOpt, alloc: *Allocator, maxsize: usize) (Allocator.Error || Error)![]u8 {
+        return try self.raw.getOptAlloc(opt, alloc, maxsize);
+    }
 
+    /// Repeatly retry `getOptBuf` with increasing buffer from `alloc`. 
         /// Repeatly retry `getOptBuf` with increasing buffer from `alloc`. 
-        /// If `opt` could not be read by libzmq, it would become an infinite loop.
-        /// The memory size is initially 512 bytes, then plus 512 bytes each turn.
-        pub fn getOptAllocAuto(self: *Self, opt: SockOpt, alloc: *Allocator) (Allocator.Error||Error)![]u8 {
-            return try self.raw.getOptAllocAuto(opt, alloc);
-        }
+    /// Repeatly retry `getOptBuf` with increasing buffer from `alloc`. 
+    /// If `opt` could not be read by libzmq, it would become an infinite loop.
+    /// The memory size is initially 512 bytes, then plus 512 bytes each turn.
+    pub fn getOptAllocAuto(self: *Self, opt: SockOpt, alloc: *Allocator) (Allocator.Error || Error)![]u8 {
+        return try self.raw.getOptAllocAuto(opt, alloc);
+    }
 
-        /// Tell socket to connect an endpoint. Caller owns `addr`.
-        /// The return does not means the connecting is complete.
-        pub fn connect(self: *Self, addr: [:0]const u8) FileError!void {
-            return try self.raw.connect(addr);
-        }
+    /// Tell socket to connect an endpoint. Caller owns `addr`.
+    /// The return does not means the connecting is complete.
+    pub fn connect(self: *Self, addr: [:0]const u8) FileError!void {
+        return try self.raw.connect(addr);
+    }
 
-        /// Tell socket to bind an endpoint. Caller owns `addr`.
-        pub fn bind(self: *Self, addr: [:0]const u8) FileError!void {
-            return try self.raw.bind(addr);
-        }
+    /// Tell socket to bind an endpoint. Caller owns `addr`.
+    pub fn bind(self: *Self, addr: [:0]const u8) FileError!void {
+        return try self.raw.bind(addr);
+    }
 
-        /// Set the value of a socket option.
-        pub fn setOpt(self: *Self, comptime opt: SockOpt, comptime valueT: type, value: valueT) Error!void {
-            return try self.raw.setOpt(opt, valueT, value);
-        }
+    /// Set the value of a socket option.
+    pub fn setOpt(self: *Self, comptime opt: SockOpt, comptime valueT: type, value: valueT) Error!void {
+        return try self.raw.setOpt(opt, valueT, value);
+    }
 
-        /// Send `buf`. The `buf` should be allocated by C allocator and callee owns it.
-        /// `flags` receive two kinds of arguments:
-        /// - tuple: `.{"dontWait", "more"}`
-        /// - integer: `zmq.SNDMORE | zmq.DONTWAIT`
-        pub fn send(self: *Self, buf: []const u8, flags: anytype) IOError!usize {
-            if (comptime canSend()) {
-                return try self.raw.send(buf, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("send() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Send `buf`. The `buf` should be allocated by C allocator and callee owns it.
+    /// `flags` receive two kinds of arguments:
+    /// - tuple: `.{"dontWait", "more"}`
+    /// - integer: `zmq.SNDMORE | zmq.DONTWAIT`
+    pub fn send(self: *Self, buf: []const u8, flags: anytype) IOError!usize {
+        return try self.raw.send(buf, flags);
+    }
 
-        /// Send `buf`, but won't deallocate it when sending complete.
-        /// Second advise: returned is not sent.
-        /// See `send` for possibilties of `flags`.
-        pub fn sendConst(self: *Self, buf: []const u8, flags: anytype) IOError!usize {
-            if (comptime canSend()) {
-                return try self.raw.sendConst(buf, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("sendConst() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Send `buf`, but won't deallocate it when sending complete.
+    /// Second advise: returned is not sent.
+    /// See `send` for possibilties of `flags`.
+    pub fn sendConst(self: *Self, buf: []const u8, flags: anytype) IOError!usize {
+        return try self.raw.sendConst(buf, flags);
+    }
 
-        /// Copy `buf` into a memory block allocated by C allocator and send.
-        /// Caller owns `buf`.
-        pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.Error|IOError)!usize {
-            if (comptime canSend()) {
-                return try self.raw.sendCopy(buf, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("sendCopy() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Copy `buf` into a memory block allocated by C allocator and send.
+    /// Caller owns `buf`.
+    pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.Error | IOError)!usize {
+        return try self.raw.sendCopy(buf, flags);
+    }
 
-        /// Send a `Frame` and deinitialise.
-        pub fn sendFrame(self: *Self, frame: *Frame, flags: anytype) (IOError)!usize {
-            if (comptime canSend()) {
-                return try self.raw.sendFrame(frame, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("sendFrame() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Send a `Frame` and deinitialise.
+    pub fn sendFrame(self: *Self, frame: *Frame, flags: anytype) (IOError)!usize {
+        return try self.raw.sendFrame(frame, flags);
+    }
 
-        /// Copy the value to heap and send the copy.
-        /// Use `sendConstValue` to avoid coping for constants.
-        pub fn sendValue(self: *Self, comptime V: type, value: *const V, flags: anytype) (Allocator.Error||IOError)!usize {
-            const size = @sizeOf(V);
-            return try self.sendCopy(@ptrCast([*]const u8, value)[0..size], flags);
-        }
+    /// Copy the value to heap and send the copy.
+    /// Use `sendConstValue` to avoid coping for constants.
+    pub fn sendValue(self: *Self, comptime V: type, value: *const V, flags: anytype) (Allocator.Error || IOError)!usize {
+        const size = @sizeOf(V);
+        return try self.sendCopy(@ptrCast([*]const u8, value)[0..size], flags);
+    }
 
-        /// Send a value and don't destroy it.
-        /// The value should be a constant, ZeroMQ does not have promise of when the frame will be sent.
-        pub fn sendConstValue(self: *Self, comptime V: type, value: *const V, flags: anytype) IOError!usize {
-            const size = @sizeOf(V);
-            return try self.sendConst(@ptrCast([*]const u8, value)[0..size], flags);
-        }
+    /// Send a value and don't destroy it.
+    /// The value should be a constant, ZeroMQ does not have promise of when the frame will be sent.
+    pub fn sendConstValue(self: *Self, comptime V: type, value: *const V, flags: anytype) IOError!usize {
+        const size = @sizeOf(V);
+        return try self.sendConst(@ptrCast([*]const u8, value)[0..size], flags);
+    }
 
-        /// Read the incoming frame into `buf`.
-        pub fn recv(self: *Self, buf: []u8, flags: anytype) IOError!usize {
-            if (comptime canRecv()) {
-                return try self.raw.recv(buf, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("recv() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Read the incoming frame into `buf`.
+    pub fn recv(self: *Self, buf: []u8, flags: anytype) IOError!usize {
+        return try self.raw.recv(buf, flags);
+    }
 
-        /// Allocate `maxsize` byte(s) memory and receive the incoming frame into it.
-        pub fn recvAlloc(self: *Self, alloc: *Allocator, maxsize: usize, flags: anytype) (Allocator.Error||IOError)![]u8 {
-            if (comptime canRecv()){
-                return try self.raw.recvAlloc(alloc, maxsize, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("recvAlloc() does not support by socket type {}", .{sockType}));
-            }
-        }
+    /// Allocate `maxsize` byte(s) memory and receive the incoming frame into it.
+    pub fn recvAlloc(self: *Self, alloc: *Allocator, maxsize: usize, flags: anytype) (Allocator.Error || IOError)![]u8 {
+        return try self.raw.recvAlloc(alloc, maxsize, flags);
+    }
 
-        /// Receive a exact value from socket.
-        /// Warning: the method just receive data and write them into memory. The data might not be portable.
-        pub fn recvValue(self: *Self, comptime V: type, flags: anytype) IOError!?V {
-            std.debug.assert(@typeInfo(V) != .Pointer);
-            const size = @sizeOf(V);
-            var buf = [_]u8{0} * size;
-            const recvSize = try self.recv(buf, flags);
-            if (recvSize == size) {
-                return @ptrCast(*V, buf.ptr).*;
-            } else {
-                return null;
-            }
+    /// Receive a exact value from socket.
+    /// Warning: the method just receive data and write them into memory. The data might not be portable.
+    pub fn recvValue(self: *Self, comptime V: type, flags: anytype) IOError!?V {
+        std.debug.assert(@typeInfo(V) != .Pointer);
+        const size = @sizeOf(V);
+        var buf = [_]u8{0} * size;
+        const recvSize = try self.recv(buf, flags);
+        if (recvSize == size) {
+            return @ptrCast(*V, buf.ptr).*;
+        } else {
+            return null;
         }
+    }
 
-        pub fn recvFrame(self: *Self, frame: *Frame, flags: anytype) IOError!usize {
-            if (comptime canRecv()) {
-                return try self.raw.recvFrame(frame, flags);
-            } else {
-                @compileError(std.fmt.comptimePrint("recvFrame() does not support by socket type {}", .{sockType}));
-            }
-        }
+    pub fn recvFrame(self: *Self, frame: *Frame, flags: anytype) IOError!usize {
+        return try self.raw.recvFrame(frame, flags);
+    }
 
-        pub fn recvFrameSize(self: *Self, size: usize, flags: anytype) (Allocator.Error||IOError)!Frame {
-            var frame = try Frame.initSize(size);
-            errdefer frame.deinit();
-            _ = try self.recvFrame(&frame, flags);
-            return frame;
-        }
+    pub fn recvFrameSize(self: *Self, size: usize, flags: anytype) (Allocator.Error || IOError)!Frame {
+        var frame = try Frame.initSize(size);
+        errdefer frame.deinit();
+        _ = try self.recvFrame(&frame, flags);
+        return frame;
+    }
 
-        /// Subscribe a topic. Only available on Sub/XPub sockets.
-        /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
-        pub fn subscribe(self: *Self, filter: []const u8) Error!void {
-            if (sockType == .Sub or sockType == .XPub) {
-                try self.raw.setOpt(.Subscribe, []const u8, filter);
-            } else {
-                @compileError("subscribe() only available on Sub or XPub sockets");
-            }
-        }
+    /// Subscribe a topic. Only available on Sub/XPub sockets.
+    /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
+    pub fn subscribe(self: *Self, filter: []const u8) Error!void {
+        try self.raw.setOpt(.Subscribe, []const u8, filter);
+    }
 
-        /// Unsubscribe a topic. Only available on Sub/XPub sockets.
-        /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
-        pub fn unsubscribe(self: *Self, filter: []const u8) Error!void {
-            if (sockType == .Sub or sockType == .XSub) {
-                try self.raw.setOpt(.Unsubscribe, []const u8, filter);
-            } else {
-                @compileError("unsubscribe() only available on Sub or XPub sockets");
-            }
-        }
+    /// Unsubscribe a topic. Only available on Sub/XPub sockets.
+    /// You can use this function on XPub when option XPubManual is set to true (not implemented yet).
+    pub fn unsubscribe(self: *Self, filter: []const u8) Error!void {
+        try self.raw.setOpt(.Unsubscribe, []const u8, filter);
+    }
 
-        /// Set a pre-allocated socket file descriptor.
+    /// Set a pre-allocated socket file descriptor.
+    /// When set to a positive integer value before zmq_bind is called on the socket, the socket shall use the corresponding file descriptor for connections over TCP or IPC instead of allocating a new file descriptor. 
         /// When set to a positive integer value before zmq_bind is called on the socket, the socket shall use the corresponding file descriptor for connections over TCP or IPC instead of allocating a new file descriptor. 
-        /// If set to -1 (default), a new file descriptor will be allocated instead.
-        /// NOTE: the file descriptor passed through MUST have been ran through the "bind" and "listen" system calls beforehand.
-        /// Also, socket option that would normally be passed through zmq_setsockopt like TCP buffers length, IP_TOS or SO_REUSEADDR MUST be set beforehand by the caller, as they must be set before the socket is bound.
-        pub fn setUseFD(self: *Self, fd: c_int) Error!void {
-            return try self.setOpt(.UseFD, c_int, fd);
-        }
+    /// When set to a positive integer value before zmq_bind is called on the socket, the socket shall use the corresponding file descriptor for connections over TCP or IPC instead of allocating a new file descriptor. 
+    /// If set to -1 (default), a new file descriptor will be allocated instead.
+    /// NOTE: the file descriptor passed through MUST have been ran through the "bind" and "listen" system calls beforehand.
+    /// Also, socket option that would normally be passed through zmq_setsockopt like TCP buffers length, IP_TOS or SO_REUSEADDR MUST be set beforehand by the caller, as they must be set before the socket is bound.
+    pub fn setUseFD(self: *Self, fd: c_int) Error!void {
+        return try self.setOpt(.UseFD, c_int, fd);
+    }
 
-        /// Set the proxy of the socket. Only available for TCP transport.
-        /// Does not support authentication.
-        pub fn setSocks5Proxy(self: *Self, address: [:0]const u8) Error!void {
-            return try self.setOpt(.SocksProxy, [:0]const u8, address);
-        }
+    /// Set the proxy of the socket. Only available for TCP transport.
+    /// Does not support authentication.
+    pub fn setSocks5Proxy(self: *Self, address: [:0]const u8) Error!void {
+        return try self.setOpt(.SocksProxy, [:0]const u8, address);
+    }
 
-        /// Retrieve the last endpoint set. Available for TCP or IPC transport.
-        pub fn getLastEndpointBuf(self: *Self, buf: []u8) Error![:0]const u8 {
-            var result = try self.getOptBuf(.LastEndpoint, buf);
-            return result[0..result.len-1:0];
-        }
+    /// Retrieve the last endpoint set. Available for TCP or IPC transport.
+    pub fn getLastEndpointBuf(self: *Self, buf: []u8) Error![:0]const u8 {
+        var result = try self.getOptBuf(.LastEndpoint, buf);
+        return result[0 .. result.len - 1 :0];
+    }
 
-        /// Allocator version of `getLastEndpointBuf`.
-        pub fn getLastEndpointAlloc(self: *Self, alloc: *Allocator, maxsize: usize) (Allocator.Error||Error)![:0]const u8{
-            var result = try self.getOptAlloc(.LastEndpoint, alloc, maxsize);
-            return result[0..result.len-1:0];
-        }
+    /// Allocator version of `getLastEndpointBuf`.
+    pub fn getLastEndpointAlloc(self: *Self, alloc: *Allocator, maxsize: usize) (Allocator.Error || Error)![:0]const u8 {
+        var result = try self.getOptAlloc(.LastEndpoint, alloc, maxsize);
+        return result[0 .. result.len - 1 :0];
+    }
 
-        // Auto allocator version of `getLastEndpointBuf`.
-        pub fn getLastEndpointAllocAuto(self: *Self, alloc: *Allocator) (Allocator.Error||Error)![:0]const u8{
-            var result = try self.getOptAllocAuto(.LastEndpoint, alloc);
-            return result[0..result.len-1:0];
-        }
+    // Auto allocator version of `getLastEndpointBuf`.
+    pub fn getLastEndpointAllocAuto(self: *Self, alloc: *Allocator) (Allocator.Error || Error)![:0]const u8 {
+        var result = try self.getOptAllocAuto(.LastEndpoint, alloc);
+        return result[0 .. result.len - 1 :0];
+    }
 
-        pub fn curveSetupClient(self: *Self, secretKey: []const u8) Error!void {
-            var pubK = curvePublic(secretKey);
-            try self.setOpt(.CurveServer, bool, false);
-            try self.setOpt(.CurveSecretKey, []const u8, secretKey);
-            try self.setOpt(.CurvePublicKey, []const u8, &pubK);
-        }
+    pub fn curveSetupClient(self: *Self, secretKey: []const u8) Error!void {
+        var pubK = curvePublic(secretKey);
+        try self.setOpt(.CurveServer, bool, false);
+        try self.setOpt(.CurveSecretKey, []const u8, secretKey);
+        try self.setOpt(.CurvePublicKey, []const u8, &pubK);
+    }
 
-        pub fn curveClientSetServer(self: *Self, serverPublicKey: []const u8) Error!void {
-            try self.setOpt(.CurverServerKey, []const u8, serverPublicKey);
-        }
+    pub fn curveClientSetServer(self: *Self, serverPublicKey: []const u8) Error!void {
+        try self.setOpt(.CurverServerKey, []const u8, serverPublicKey);
+    }
 
-        pub fn curveSetupServer(self: *Self, secretKey: []const u8) Error!void {
-            var pubK = curvePublic(secretKey);
-            try self.setOpt(.CurveServer, bool, true);
-            try self.setOpt(.CurveSecretKey, []const u8, secretKey);
-            try self.setOpt(.CurvePublicKey, []const u8, &pubK);
-        }
+    pub fn curveSetupServer(self: *Self, secretKey: []const u8) Error!void {
+        var pubK = curvePublic(secretKey);
+        try self.setOpt(.CurveServer, bool, true);
+        try self.setOpt(.CurveSecretKey, []const u8, secretKey);
+        try self.setOpt(.CurvePublicKey, []const u8, &pubK);
+    }
 
-        /// Return true if the message part last received from the socket was a data part with more parts to follow.
-        /// If there are no data parts to follow, this option shall return false.
-        /// Undefined behaviour will be triggered if being called without any message part received before.
-        pub fn getRcvMore(self: *Self) bool {
-            return self.getOpt(bool, .RcvMore) catch unreachable;
-        }
-    };
-}
+    /// Return true if the message part last received from the socket was a data part with more parts to follow.
+    /// If there are no data parts to follow, this option shall return false.
+    /// Undefined behaviour will be triggered if being called without any message part received before.
+    pub fn getRcvMore(self: *Self) bool {
+        return self.getOpt(bool, .RcvMore) catch unreachable;
+    }
+};
 
 pub fn curvePublic(secretKey: []const u8) [32]u8 {
     std.debug.assert(secretKey.len == 32);
@@ -867,13 +818,13 @@ test "Socket: setOpt and getOpt" {
 
 test "Socket: getOptBuf and getOptAlloc" {
     const _t = std.testing;
-    const ROUTINGID = [_]u8{2, 3, 5, 7, 8};
+    const ROUTINGID = [_]u8{ 2, 3, 5, 7, 8 };
     var ctx = try Context.init();
     defer ctx.deinit();
     var sock = try ctx.socket(.Pair);
     defer sock.deinit();
     try sock.setOpt(.RoutingId, []const u8, &ROUTINGID);
-    
+
     var id = try sock.getOptAlloc(.RoutingId, _t.allocator, 256);
     defer _t.allocator.free(id);
     try _t.expectEqualStrings(&ROUTINGID, id);
@@ -925,7 +876,7 @@ test "Socket: getRcvMore" {
     try _t.expect(sock1.getRcvMore());
 }
 
-const FrameOpt = enum (c_int) {
+const FrameOpt = enum(c_int) {
     More = c.ZMQ_MORE,
     SrcFD = c.ZMQ_SRCFD,
     Shared = c.ZMQ_SHARED,
@@ -941,7 +892,7 @@ const Frame = struct {
     pub fn init() Self {
         var raw = std.mem.zeroes(c.zmq_msg_t);
         const stat = c.zmq_msg_init(&raw);
-        return Self {
+        return Self{
             .raw = raw,
         };
     }
@@ -957,7 +908,7 @@ const Frame = struct {
         var raw = std.mem.zeroes(c.zmq_msg_t);
         const stat = c.zmq_msg_init_size(&raw, blksize);
         if (stat >= 0) {
-            return Self {
+            return Self{
                 .raw = raw,
             };
         } else {
@@ -1005,7 +956,7 @@ const Frame = struct {
     /// Routing IDs are transient.
     pub fn getRoutingId(self: *Self) ?u32 {
         const id = c.zmq_msg_routing_id(&self.raw);
-        if (id > 0){
+        if (id > 0) {
             return id;
         } else {
             return null;
@@ -1021,7 +972,7 @@ const Frame = struct {
     }
 
     pub fn getPeerAddress(self: *Self) ?[:0]const u8 {
-        if (@hasDecl(c, "ZMQ_MSG_PROPERTY_PEER_ADDRESS")){
+        if (@hasDecl(c, "ZMQ_MSG_PROPERTY_PEER_ADDRESS")) {
             return self.getProperty(c.ZMQ_MSG_PROPERTY_PEER_ADDRESS);
         } else {
             return self.getProperty("Peer-Address");
@@ -1031,7 +982,7 @@ const Frame = struct {
     pub fn getProperty(self: *Self, key: [:0]const u8) ?[:0]const u8 {
         var ptr = c.zmq_msg_gets(&self.raw, key);
         if (ptr) |nnptr| {
-            return nnptr[0..std.mem.len(nnptr):0];
+            return nnptr[0..std.mem.len(nnptr) :0];
         } else {
             return null;
         }
@@ -1051,7 +1002,7 @@ const Frame = struct {
                     @compileError(".More accepts bool as type");
                 }
             },
-            
+
             .SrcFD => {
                 if (T == c_int) {
                     const val = c.zmq_msg_get(&self.raw, @bitCast(c_int, opt));
@@ -1120,7 +1071,7 @@ test "Frame: size" {
 
 test "Frame: recv and send" {
     const _t = std.testing;
-    {   
+    {
         const DATA = "BT-7274";
         var ctx = try Context.init();
         defer ctx.deinit();
@@ -1148,7 +1099,7 @@ test "Frame: recv and send" {
 
 test "Frame: getOpt" {
     const _t = std.testing;
-    {   
+    {
         const DATA = "BT-7274";
         var ctx = try Context.init();
         defer ctx.deinit();
@@ -1174,6 +1125,150 @@ test "Frame: getOpt" {
             defer frame.deinit();
             try _t.expectEqual(true, try frame.getOpt(bool, .More));
             (try sock1.recvFrameSize(256, .{})).deinit();
+        }
+    }
+}
+
+fn buildEventFlags(val: anytype) c_short {
+    const T = @TypeOf(val);
+    const info = @typeInfo(T);
+    if (info == .Int or info == .ComptimeInt) {
+        return @intCast(c_short, val);
+    } else if (info == .Struct) {
+        var iflags = @intCast(c_short, 0);
+        inline for (info.Struct.fields) |field| {
+            const value = @field(val, field.name);
+            if (comptime std.mem.eql(u8, value, "in")) {
+                iflags |= @intCast(c_short, c.ZMQ_POLLIN);
+            } else if (comptime std.mem.eql(u8, value, "out")) {
+                iflags |= @intCast(c_short, c.ZMQ_POLLOUT);
+            } else {
+                @compileError(std.fmt.comptimePrint("unregonised flag: {s}", .{value}));
+            }
+        }
+        return iflags;
+    } else {
+        @compileError(std.fmt.comptimePrint("expect tuple or integer, got {}", .{T}));
+    }
+}
+
+pub const PollEvent = struct {
+    socket: *Socket,
+    in: bool,
+    out: bool,
+
+    const Self = @This();
+};
+
+const Poller = struct {
+    mapping: std.AutoArrayHashMap(*c_void, *Socket),
+    pollItems: std.ArrayList(c.zmq_pollitem_t),
+    alloc: *Allocator,
+    nextStartFind: usize = 0,
+
+    const Self = @This();
+
+    pub const IN = c.ZMQ_POLLIN;
+    pub const OUT = c.ZMQ_POLLOUT;
+
+    pub fn init(alloc: *Allocator) Self {
+        return Self{
+            .mapping = std.AutoArrayHashMap(*c_void, *Socket).init(alloc),
+            .pollItems = std.ArrayList(c.zmq_pollitem_t).init(alloc),
+            .alloc = alloc,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.mapping.deinit();
+        self.pollItems.deinit();
+    }
+
+    pub fn add(self: *Self, socket: *Socket, events: anytype) Allocator.Error!void {
+        if (self.pollItems.items.len >= std.math.maxInt(c_int)) {
+            return Allocator.Error.OutOfMemory;
+        }
+        try self.mapping.put(socket.raw._sock, socket);
+        try self.pollItems.append(.{
+            .socket = socket.raw._sock,
+            .fd = 0,
+            .events = buildEventFlags(events),
+            .revents = 0,
+        });
+    }
+
+    pub fn rm(self: *Self, socket: *Socket) void {
+        const i = for (self.pollItems.items) |item, i| blk: {
+            if (item.socket == socket.raw._sock) {
+                break :blk i;
+            }
+        };
+        self.pollItems.orderedRemove(i);
+        self.mapping.orderedRemove(socket.raw._sock);
+    }
+
+    pub fn findNextEvent(self: *Self) ?PollEvent {
+        for (self.pollItems.items) |*item| {
+            if (item.revents > 0) {
+                var result = PollEvent{
+                    .socket = self.mapping.get(item.socket.?).?,
+                    .in = item.revents & IN > 0,
+                    .out = item.revents & OUT > 0,
+                };
+                item.revents = @as(c_short, 0);
+                return result;
+            }
+        }
+        return null;
+    }
+
+    pub fn wait(self: *Self, timeout: c_int) Error!?PollEvent {
+        const n = c.zmq_poll(self.pollItems.items.ptr, @intCast(c_int, self.pollItems.items.len), timeout);
+        if (n > 0) {
+            return self.findNextEvent();
+        } else if (n == 0) {
+            return null;
+        } else {
+            return switch (getErrNo()) {
+                c.ETERM => Error.Terminated,
+                c.EFAULT => unreachable,
+                c.EINTR => Error.Interrupted,
+                else => unreachable,
+            };
+        }
+    }
+};
+
+test "Poller" {
+    const _t = std.testing;
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Pair);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Pair);
+    defer sock1.deinit();
+    try sock0.bind("inproc://test");
+    try sock1.connect("inproc://test");
+
+    var poller = Poller.init(_t.allocator);
+    defer poller.deinit();
+    try poller.add(&sock0, .{"in"});
+    try poller.add(&sock1, Poller.IN);
+
+    _ = try sock0.sendConst("PING", .{});
+    var i = @as(i32, 3);
+    while (i>0) {
+        var pollev = try poller.wait(-1);
+        if (pollev) |event| {
+            var socket = event.socket;
+            var buf = try socket.recvAlloc(_t.allocator, 256, .{});
+            defer _t.allocator.free(buf);
+            if (std.mem.eql(u8, "PING", buf)) {
+                _ = try socket.sendConst("PONG", .{});
+            } else if (std.mem.eql(u8, "PONG", buf)) {
+                i -= 1;
+                _ = try socket.sendConst("PING", .{});
+            } else unreachable;
         }
     }
 }
