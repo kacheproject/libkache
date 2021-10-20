@@ -914,9 +914,16 @@ const Frame = struct {
     raw: c.zmq_msg_t,
     _beSentFlag: bool = false,
     _closed: bool = false,
+    _zeroCopyMeta: ?*ZeroCopyMeta = null,
 
     const Self = @This();
 
+    const ZeroCopyMeta = struct {
+        slice: []u8,
+        alloc: *Allocator,
+    };
+
+    /// Initialise frame.
     pub fn init() Self {
         var raw = std.mem.zeroes(c.zmq_msg_t);
         const stat = c.zmq_msg_init(&raw);
@@ -925,13 +932,19 @@ const Frame = struct {
         };
     }
 
+    /// Deinitialise this structure.
+    /// You can always call this function when your work is done.
+    /// It will try to ensure the data will not be free'd before they are sent.
+    /// Caution: use sendFrame and recvFrame instead of other functions for frames!
     pub fn deinit(self: *Self) void {
-        if (!self._closed and !self._beSentFlag) {
+        if (!(self._closed or self._beSentFlag)) {
             _ = c.zmq_msg_close(&self.raw);
         }
         self._closed = true;
     }
 
+    /// Initialise frame with specific size.
+    /// Note the memory is allocated by libzmq.
     pub fn initSize(blksize: usize) Allocator.Error!Self {
         var raw = std.mem.zeroes(c.zmq_msg_t);
         const stat = c.zmq_msg_init_size(&raw, blksize);
@@ -947,6 +960,8 @@ const Frame = struct {
         }
     }
 
+    /// Initialise frame with specific size and copy `buf` into it.
+    /// Note the memory is allocated by libzmq.
     pub fn initCopy(buf: []const u8) Allocator.Error!Self {
         var frame = try Self.initSize(buf.len);
         if (frame.data()) |d| {
@@ -955,7 +970,38 @@ const Frame = struct {
         return frame;
     }
 
-    // Rubicon: It's hard to implement zmq_init_data with zig's slices and allocators, so leave it alone.
+    fn zmqAutoFreeFn(d: ?*c_void, hint: ?*c_void) callconv(.C) void {
+        var meta = @ptrCast(*align(1) Self.ZeroCopyMeta, hint.?);
+        meta.alloc.free(meta.slice);
+        meta.alloc.destroy(meta);
+    }
+
+    /// Initialise frame in zero copy favour.
+    /// This funtion will allocate memory for some meta infomation in `alloc`.
+    /// That's because the callback of zmq_msg_init_data() does not provide the size of `buf`, which is key to deallocate the memory.
+    /// So we need to save the size in this structure and make sure it could be accessed when the callback is being called.
+    /// You must call .deinit() to deinitialise the structure (or memory will leak). The data will not be deinitialise if it have been queued, and will be free'd after it have been send.
+    pub fn initData(buf: []u8, alloc: *Allocator) Allocator.Error!Self {
+        var raw = std.mem.zeroes(c.zmq_msg_t);
+        var meta = try alloc.create(ZeroCopyMeta);
+        errdefer alloc.destroy(meta);
+        meta.* = ZeroCopyMeta {
+            .slice = buf,
+            .alloc = alloc,
+        };
+        const stat = c.zmq_msg_init_data(&raw, buf.ptr, buf.len, zmqAutoFreeFn, meta);
+        if (stat >= 0) {
+            return Self {
+                .raw = raw,
+                ._zeroCopyMeta = meta,
+            };
+        } else {
+            return switch (getErrNo()) {
+                c.ENOMEM => Allocator.Error.OutOfMemory,
+                else => unreachable,
+            };
+        }
+    }
 
     pub fn size(self: *Self) usize {
         return c.zmq_msg_size(&self.raw);
@@ -1080,6 +1126,14 @@ test "Frame: initialise and deinitialise" {
         for (DATA) |ch, i| data[i] = ch;
         try _t.expectEqualStrings(DATA, frame.data().?);
     }
+
+    {
+        const DATA = "Hello World!";
+        var buf = try _t.allocator.dupe(u8, DATA);
+        var frame = try Frame.initData(buf, _t.allocator);
+        defer frame.deinit();
+        try _t.expectEqualStrings(DATA, frame.data().?);
+    }
 }
 
 test "Frame: size" {
@@ -1112,6 +1166,31 @@ test "Frame: recv and send" {
 
         {
             var frame = try Frame.initCopy(DATA);
+            defer frame.deinit();
+            _ = try sock0.sendFrame(&frame, .{});
+        }
+        {
+            var frame = try sock1.recvFrameSize(256, .{});
+            defer frame.deinit();
+            try _t.expectEqual(@as(usize, 7), frame.data().?.len);
+            try _t.expectEqual(@as(usize, 7), frame.size());
+            try _t.expectEqualStrings(DATA, frame.data().?);
+        }
+    }
+    {
+        const DATA = "BT-7274";
+        var ctx = try Context.init();
+        defer ctx.deinit();
+        var sock0 = try ctx.socket(.Pair);
+        defer sock0.deinit();
+        var sock1 = try ctx.socket(.Pair);
+        defer sock1.deinit();
+        try sock0.bind("inproc://hello");
+        try sock1.connect("inproc://hello");
+
+        {
+            var buf = try _t.allocator.dupe(u8, DATA);
+            var frame = try Frame.initData(buf, _t.allocator);
             defer frame.deinit();
             _ = try sock0.sendFrame(&frame, .{});
         }
