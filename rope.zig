@@ -15,12 +15,14 @@ const EventPub = struct {
 
     const Self = @This();
 
-    fn init(zctx: zmq.Context, router: *Router) !Self {
+    fn init(zctx: *zmq.Context, router: *Router) (zmq.FileError || zmq.Error)!Self {
         var result = Self {
-            .zPubOut = zctx.socket(.Pub),
-            .zXSub = zctx.socket(.XSub),
-            .zXPub = zctx.socket(.XPub),
+            .zPubOut = try zctx.socket(.Pub),
+            .zXSub = try zctx.socket(.XSub),
+            .zXPub = try zctx.socket(.XPub),
         };
+        try result.zXPub.bind("inproc://rope.eventpub");
+        return result;
     }
 
     fn deinit(self: *Self) void {
@@ -150,19 +152,20 @@ pub const Router = struct {
 
     pub fn init(id: u64, alloc: *Allocator) (zmq.FileError || Error || Allocator.Error)!*Self {
         var result = try alloc.create(Self);
-        var ctx = try Context.init();
+        var ctx = try zmq.Context.init();
         result.* = Self {
             .zctx = ctx,
             .eventPub = undefined,
             .poller = zmq.Poller.init(alloc),
-            .clk = VecClock.init(id, 0, alloc),
+            .clk = try VecClock.init(id, 0, alloc),
             .alloc = alloc,
             .myid = id,
             .zEvSideListen = try ctx.socket(.Sub),
         };
-        result.eventPub = try EventPub.init(ctx, &router);
+        result.eventPub = try EventPub.init(&result.zctx, result);
         try result.zEvSideListen.subscribe("");
         try result.addEventPubSocketPolls();
+        return result;
     }
 
     fn addEventPubSocketPolls(self: *Self) !void {
@@ -175,8 +178,10 @@ pub const Router = struct {
         self.eventPub.deinit();
         self.zEvSideListen.deinit();
         // Other resources
+        self.clk.deinit();
+        self.poller.deinit();
         self.zctx.deinit();
-        self.alloc.free(self);
+        self.alloc.destroy(self);
     }
 
     fn handleSideListen(self: *Self) zmq.IOError!void {
@@ -212,7 +217,7 @@ pub const Router = struct {
 
     pub fn start(self: *Self) zmq.FileError!void {
         try self.eventPub.outBind("tcp://*:*"); // TODO: use secure tunnel
-        _l.notice("router started");
+        _l.notice("router started", .{});
     }
 };
 
