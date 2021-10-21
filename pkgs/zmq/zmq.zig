@@ -463,6 +463,14 @@ pub const RawSocket = struct {
             return getIOError();
         }
     }
+
+    pub fn sendEmpty(self: *Self, flags: anytype) IOError!void {
+        const iflags = buildFlags(flags);
+        const stat = c.zmq_send_const(self._sock, null, 0, iflags);
+        if (stat < 0) {
+            return getIOError();
+        }
+    }
 };
 
 pub const Socket = struct {
@@ -692,6 +700,11 @@ pub const Socket = struct {
             else => return e,
         };
     }
+    
+    /// Send an empty frame.
+    pub fn sendEmpty(self: *Self, flags: anytype) IOError!void {
+        return self.raw.sendEmpty(flags);
+    }
 };
 
 pub fn curvePublic(secretKey: []const u8) [32]u8 {
@@ -902,6 +915,23 @@ test "Socket: getRcvMore" {
     var buf: [256]u8 = undefined;
     _ = try sock1.recv(&buf, .{});
     try _t.expect(sock1.getRcvMore());
+}
+
+test "Socket: sendEmpty" {
+    const _t = std.testing;
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Pair);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Pair);
+    defer sock1.deinit();
+    try sock0.bind("inproc://test");
+    try sock1.connect("inproc://test");
+
+    try sock0.sendEmpty(.{});
+    var frame = try sock1.recvFrameSize(1, .{});
+    defer frame.deinit();
+    try _t.expectEqual(@as(usize, 0), frame.size());
 }
 
 pub const FrameOpt = enum(c_int) {
