@@ -11,11 +11,15 @@ pub const VecClock = struct {
 
     pub fn init(myid: u64, initialClk: u64, alloc: *Allocator) Allocator.Error!Self {
         var result = Self {
-            .vec = HashMap(u64, u64, std.hash_map.AutoContext(u64), 0.8).init(alloc),
+            .vec = HashMap(u64, u64).init(alloc),
             .myid = myid,
         };
         try result.vec.put(myid, initialClk);
         return result;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.vec.deinit();
     }
 
     pub fn canBeUpdated(self: *Self, k: u64, clk: u64) bool {
