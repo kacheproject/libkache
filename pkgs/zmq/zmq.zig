@@ -1267,7 +1267,7 @@ pub const PollEvent = struct {
     const Self = @This();
 };
 
-const Poller = struct {
+pub const Poller = struct {
     mapping: std.AutoArrayHashMap(*c_void, *Socket),
     pollItems: std.ArrayList(c.zmq_pollitem_t),
     alloc: *Allocator,
