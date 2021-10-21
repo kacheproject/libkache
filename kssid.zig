@@ -62,7 +62,7 @@ test "Generator.generate() can generate different number in each call" {
 }
 
 test "Generator.generate() can generate naturally shortable id across seconds" {
-    const idNumber = 10;
+    const idNumber = 3;
     const expect = std.testing.expect;
 
     var buf0 = [_]u64{0} ** idNumber;
