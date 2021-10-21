@@ -12,7 +12,7 @@ fn selfPackage(name: []const u8, path: []const u8, skipTest: bool) autopkg.AutoP
     return autopkg.genExport(autopkg.AutoPkg{
         .name = name,
         .path = path,
-        .rootSrc = "src/kache.zig",
+        .rootSrc = "kache.zig",
         .dependencies = &.{
             autopkg.accept(sam3),
             autopkg.accept(sqlite.package("sqlite", "pkgs/sqlite", .{})),
@@ -20,6 +20,9 @@ fn selfPackage(name: []const u8, path: []const u8, skipTest: bool) autopkg.AutoP
         },
         .linkLibC = true,
         .doNotTest = skipTest,
+        .testSrcs = &.{
+            "rope.zig",
+        },
     });
 }
 

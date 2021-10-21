@@ -1,10 +1,10 @@
 const std = @import("std");
-const HashMap = std.HashMap;
+const HashMap = std.AutoArrayHashMap;
 const Allocator = std.mem.Allocator;
 const kssid = @import("./kssid.zig");
 
-const VecClock = struct {
-    vec: HashMap(u64, u64, std.hash_map.AutoContext(u64), 0.9),
+pub const VecClock = struct {
+    vec: HashMap(u64, u64),
     myid: u64,
 
     const Self = @This();

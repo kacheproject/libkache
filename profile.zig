@@ -137,6 +137,14 @@ const SqliteKV = struct {
     pub fn keys(self: *Self) !ArrayList([]const u8) {
         return self.keysAlloc(self.alloc);
     }
+
+    pub fn keysCount(self: *Self, alloc: *Allocator) !u64 {
+        const query = std.fmt.allocPrintZ(
+            self.alloc,
+            "SELECT DISTINCT key FROM {s} ORDER BY created_at ASC, id ASC WHERE value != NULL;",
+            .{self.name},
+        );
+    }
 };
 
 fn createMemoryDatabase() !sqlite.Db {

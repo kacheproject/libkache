@@ -1,9 +1,11 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const zmq = @import("../pkgs/zmq/zmq.zig");
+const zmq = @import("pkgs/zmq/zmq.zig");
 const VecClock = @import("crdt.zig").VecClock;
 const pn = @import("pn.zig");
+
+const _l = std.log.scoped(.Rope);
 
 // event = event_name router_id clock user_message
 const EventPub = struct {
@@ -47,12 +49,24 @@ const EventPub = struct {
         }
     }
 
-    fn inHandle(self: *Self, socket: *Socket, alloc: *Allocator) zmq.IOError!void {
+    fn inHandle(self: *Self, socket: *Socket, alloc: *Allocator, clk: *VecClock) (zmq.IOError || Allocator.Error)!void {
         if (socket == &self.zXSub) {
-            try proxyMessage(&self.zXSub, &self.zXPub, EventMessage.USERMSG_MAXSIZE);
-            // TODO: drop message if the clock is out of date
+            var msg = try EventMessage.recv(&self.zXSub, alloc) catch |e| switch (e) {
+                error.BadMessage => {
+                    _l.warn("eventpub receive bad message", .{});
+                    return;
+                },
+                else => return e,
+            };
+            defer msg.deinit();
+            if (clk.canBeUpdated(msg.routerId, msg.clock)) {
+                _ = try msg.send(&self.zXPub);
+            } else {
+                _l.debug("eventpub drop message {}/{}", .{msg.routerId, msg.clock});
+            }
         } else {
             try proxyMessage(&self.zXPub, &self.zXSub, EventMessage.USERMSG_MAXSIZE);
+            // TODO: optz this case, XPub only send subscribes message out
         }
     }
 };
@@ -91,25 +105,27 @@ const EventMessage = struct {
         }
     }
 
-    pub fn send(self: *Self, socket: *zmq.Socket) zmq.IOError!void {
-        _ = try socket.send(self.eventName, .{"more"});
+    pub fn send(self: *Self, socket: *zmq.Socket) (zmq.IOError || Allocator.Error)!void {
+        _ = try socket.sendCopy(self.eventName, .{"more"});
         const routerIdP = pn.toPortableInt(u64, self.routerId);
-        const routerIdPS = pn.getIntByteSlice(u64, &routerIdP);
-        _ = try socket.send(routerIdPS, .{"more"});
+        _ = try socket.sendValue(u64, routerIdP, .{"more"});
         const clkP = pn.toPortableInt(u64, self.clock);
-        const clkPS = pn.getIntByteSlice(u64, &clkP);
-        _ = try socket.send(clkPS, .{"more"});
-        _ = try socket.send(self.userMessage, .{});
+        _ = try socket.sendValue(clkP, .{"more"});
+        _ = try socket.sendCopy(self.userMessage, .{});
     }
+
+    // TODO: zero-copy function to send message
 
     pub fn recv(socket: *zmq.Socket, alloc: *Allocator) (Allocator.Error || zmq.IOError || Error)!Self {
         var eventName = try socket.recvAlloc(alloc, 255, .{});
+        errdefer alloc.free(eventName);
         if (!socket.getRcvMore()) return Error.BadMessage;
         var routerId = pn.fromPortableInt(try socket.recvValue(u64, .{}));
         if (!socket.getRcvMore()) return Error.BadMessage;
         var clock = pn.fromPortableInt(try socket.recvValue(u64, .{}));
         if (!socket.getRcvMore()) return Error.BadMessage;
         var userMessage = try socket.recvAlloc(alloc, 2048, .{});
+        errdefer alloc.free(eventName);
         if (!socket.getRcvMore()) return Error.BadMessage;
         return Self.init(eventName, routerId, clock, userMessage, alloc);
     }
@@ -130,6 +146,8 @@ pub const Router = struct {
 
     const Error = error {} || zmq.Error;
 
+    const IOError = error{} || zmq.IOError;
+
     pub fn init(id: u64, alloc: *Allocator) (zmq.FileError || Error || Allocator.Error)!*Self {
         var result = try alloc.create(Self);
         var ctx = try Context.init();
@@ -137,7 +155,7 @@ pub const Router = struct {
             .zctx = ctx,
             .eventPub = undefined,
             .poller = zmq.Poller.init(alloc),
-            .clk = VecClock.init(id, alloc),
+            .clk = VecClock.init(id, 0, alloc),
             .alloc = alloc,
             .myid = id,
             .zEvSideListen = try ctx.socket(.Sub),
@@ -153,7 +171,10 @@ pub const Router = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Deinitialise sockets
         self.eventPub.deinit();
+        self.zEvSideListen.deinit();
+        // Other resources
         self.zctx.deinit();
         self.alloc.free(self);
     }
@@ -161,20 +182,45 @@ pub const Router = struct {
     fn handleSideListen(self: *Self) zmq.IOError!void {
         var msg = try EventMessage.recv(&self.zEvSideListen);
         if (self.clk.canBeUpdated(msg.routerId, msg.clock)) {
-            try self.clk.update(msg.routerId, msg.clock);
+            const oldClk = self.clk.vec.get(msg.routerId);
+            _ = try self.clk.update(msg.routerId, msg.clock);
+            _l.debug("clock updated for {}: {} -> {}", .{msg.routerId, oldClk, msg.clock});
         }
+    }
+
+    /// Publish a message though event pub.
+    /// If `alloc` is not null, `eventName` and `userMessage` will be free'd after message sent.
+    /// Warning: all event name prefixed with `_` are only for internal use of rope or kache.
+    /// This function does zero check on names.
+    pub fn publish(self: *Self, eventName: []const u8, userMessage: []const u8, alloc: ?*Allocator) (IOError || Allocator.Error)!void {
+        var clk = self.clk.increment(1);
+        var msg = EventMessage.init(eventName, self.myid, clk, userMessage, alloc);
+        defer msg.deinit();
+        try msg.send(self.eventPub.zPubOut);
     }
 
     pub fn poll(self: *Self, timeout: c_int) !void {
         if (self.poller.wait(timeout)) |pollev| {
             var sock = pollev.socket;
             if (sock == &self.eventPub.zXPub or sock == &self.eventPub.zXSub) {
-                try self.eventPub.inHandle(sock);
+                try self.eventPub.inHandle(sock, self.alloc, &self.clk);
+            } else if (sock == &self.zEvSideListen) {
+                try self.handleSideListen();
             }
         }
     }
 
     pub fn start(self: *Self) zmq.FileError!void {
         try self.eventPub.outBind("tcp://*:*"); // TODO: use secure tunnel
+        _l.notice("router started");
     }
 };
+
+test "Router initialise, start and deinitialise" {
+    const _t = std.testing;
+    const kssid = @import("kssid.zig");
+    var gen = kssid.Generator.init();
+    var router = try Router.init(gen.generate(), _t.allocator);
+    try router.start();
+    defer router.deinit();
+}

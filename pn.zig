@@ -7,6 +7,18 @@ pub fn getIntByteSlice(comptime T: type, n: *T) []u8 {
     return @ptrCast([*]u8, n)[0..@sizeOf(T)];
 }
 
+fn zigZagEncode(comptime T: type, n: T) T {
+    if (n >= 0) {
+        var k1: T = undefined;
+        @shlWithOverflow(T, n, 1, &k1);
+        return k1;
+    } else {
+        var k1: T = undefined;
+        @shlWithOverflow(T, -n-1, 1, &k1);
+        return k1 | 1;
+    }
+}
+
 fn reserveInt(comptime T: type, n: T) T {
     if (@typeInfo(T).Int.signedness == .signed) @compileError("expect unsigned integer");
     var arr = std.PackedIntArray(T, 1).initAllTo(n).sliceCast(u8);

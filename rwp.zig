@@ -14,18 +14,23 @@ const FLAG_CMD = @as(u8, 1) << 6;
 const FLAG_MORE = @as(u8, 1) << 7;
 const FLAG_LONG = @as(u8, 1) << 5;
 
-const Command = enum(u8) {
+pub const Command = enum(u8) {
     AskOpt = 1,
     SetOpt = 2,
     Subscribe = 3,
     Unsubscribe = 4,
+    Sync = 5,
 };
 
 
-const Opt = enum(u8) {
+pub const Opt = enum(u8) {
     Version = 1,
     SocketType = 2,
     RoutingId = 3,
+};
+
+pub const Error = error{
+    Corrupted,
 };
 
 
@@ -207,10 +212,6 @@ pub const FrameDecoder = struct {
     nextByte: u64,
     frame: *Frame,
     size: u64,
-
-    const Error = error{
-        Corrupted,
-    };
 
     const Self = @This();
 
@@ -417,3 +418,120 @@ test "FrameDecoder and FrameEncoder" {
         try _t.expectEqualStrings(DATA, frame1.data);
     }
 }
+
+pub const CommandView = struct {
+    frame: *Frame,
+
+    const Self = @This();
+
+    pub fn can(frame: *Frame) bool {
+        return frame.header.cmd;
+    }
+
+    pub fn init(frame: *Frame) Self {
+        return Self {
+            .frame = frame,
+        };
+    }
+
+    pub fn check(self: *Self) bool {
+        return self.frame.data.len >= 1;
+    }
+
+    pub fn getCommand(self: *Self) Command {
+        return @intToEnum(Command, self.frame.data[0]);
+    }
+
+    pub fn setCommand(self: *Self, cmd: Command) void {
+        self.frame.data[0] = @enumToInt(cmd);
+    }
+
+    pub fn getArg(self: *Self) ?[]const u8 {
+        if (self.frame.data.len > 1) {
+            return self.frame.data[1..self.frame.data.len];
+        } else {
+            return null;
+        }
+        
+    }
+
+    pub fn calcSizeOf(cmd: Command, arg: []const u8) usize {
+        return 1 + arg.len;
+    }
+};
+
+test "CommandView" {
+    const _t = std.testing;
+}
+
+pub const AskOptView = struct {
+    view: CommandView,
+
+    const Self = @This();
+
+    pub fn can(frame: *Frame) bool {
+        return CommandView.can(frame) and (CommandView.init(frame).getCommand().* == .AskOpt);
+    }
+
+    pub fn check(self: *Self) bool {
+        return self.view.getArg().?.len == 1;
+    }
+
+    pub fn option(self: *Self) Opt {
+        return @intToEnum(Opt, self.view.getArg().?[0]);
+    }
+};
+
+pub const SetOptView = struct {
+    view: CommandView,
+
+    const Self = @This();
+
+    pub fn can(frame: *Frame) bool {
+        return CommandView.can(frame) and (CommandView.init(frame).getCommand() == .SetOpt);
+    }
+
+    pub fn check(self: *Self) bool {
+        return self.view.getArg().?.len > 1;
+    }
+
+    pub fn option(self: *Self) Opt {
+        return @intToEnum(Opt, self.view.getArg().?[0]);
+    }
+
+    pub fn value(self: *Self) []const u8 {
+        return self.view.getArg()[1..self.view.getArg().?.len];
+    }
+
+    pub fn calcSizeValue(opt: Opt, buf: []const u8) usize {
+        return CommandView.calcSizeOf(.SetOpt, 1+buf.len);
+    }
+
+    pub fn valueAsInt(self: *Self, comptime T: type) T {
+        return toPortableInt(T, byteSliceToInt(T, self.value()));
+    }
+
+    pub fn setValueAsInt(self: *Self, comptime T: type, val: T) void {
+        const pInt = toPortableInt(T, val);
+        const slice = intAsByteSlice(T, &pInt);
+        for (slice) |c, i| {
+            self.value()[i] = c;
+        }
+    }
+
+    pub fn calcSizeValueInt(opt: Opt, comptime T: type) usize {
+        return CommandView.calcSizeOf(.SetOpt, 1+@typeInfo(T).Int.bits);
+    }
+
+    pub fn valueAsBool(self: *Self) bool {
+        return self.valueAsInt(u8) != 0;
+    }
+
+    pub fn setValueAsBool(self: *Self, val: bool) void {
+        self.setValueAsInt(u8, 1);
+    }
+
+    pub fn calcSizeValueBool(opt: Opt) usize {
+        return self.calcSizeValueBool(opt, u8);
+    }
+};
