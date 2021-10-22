@@ -171,7 +171,7 @@ const PhysicalAddress = struct {
     }
 
     pub fn maybeReachable(self: *Self, time: u64) bool {
-        return std.math.approxEqAbs(u64, self.lastReachable, 10);
+        return (std.math.max(self.lastReachable, time) - std.math.min(self.lastReachable, time)) > 0;
     }
 };
 
