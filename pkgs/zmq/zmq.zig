@@ -156,6 +156,24 @@ pub const SockOpt = enum(c_int) {
     }
 };
 
+pub const SocketEvent = enum(u16) {
+    Connected = c.ZMQ_EVENT_CONNTECTED,
+    Delayed = c.ZMQ_EVENT_CONNECT_DELAYED,
+    Retring = c.ZMQ_EVENT_CONNECT_RETRIED,
+    Listening = c.ZMQ_EVENT_LISTENING,
+    BindFailed = c.ZMQ_EVENT_BIND_FAILED,
+    Accepted = c.ZMQ_EVENT_ACCEPTED,
+    AcceptFailed = c.ZMQ_EVENT_ACCEPT_FAILED,
+    Closed = c.ZMQ_EVENT_CLOSED,
+    CloseFailed = c.ZMQ_EVENT_CLOSE_FAILED,
+    Disconnected = c.ZMQ_EVENT_DISCONNECTED,
+    MonitorStopped = c.ZMQ_EVENT_MONITOR_STOPPED,
+    HandshakeFailed = c.ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL,
+    HandshakeSucceeded = c.ZMQ_EVENT_HANDSHAKE_SUCCEEDED,
+    HandshakeBadProtocol = c.ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL,
+    HandshakeBadAuth = c.ZMQ_EVENT_HANDSHAKE_FAILED_AUTH,
+};
+
 pub const RawSocket = struct {
     _sock: *c_void,
 
@@ -470,6 +488,11 @@ pub const RawSocket = struct {
         if (stat < 0) {
             return getIOError();
         }
+    }
+
+    fn buildSocketEventFlags(events: anytype) c_int {}
+
+    pub fn startMonitor(self: *Self, endpoint: [:0]const u8, events: anytype) Error!Self {
     }
 };
 
@@ -994,9 +1017,7 @@ pub const Frame = struct {
     /// Note the memory is allocated by libzmq.
     pub fn initCopy(buf: []const u8) Allocator.Error!Self {
         var frame = try Self.initSize(buf.len);
-        if (frame.data()) |d| {
-            std.mem.copy(u8, d, buf);
-        } else unreachable; // If initSize return without error, data should have value.
+        std.mem.copy(u8, frame.data(), buf);
         return frame;
     }
 
@@ -1037,13 +1058,9 @@ pub const Frame = struct {
         return c.zmq_msg_size(&self.raw);
     }
 
-    pub fn data(self: *Self) ?[]u8 {
+    pub fn data(self: *Self) []u8 {
         var ptr = c.zmq_msg_data(&self.raw);
-        if (ptr) |nnptr| {
-            return @ptrCast([*]u8, nnptr)[0..self.size()];
-        } else {
-            return null;
-        }
+        return @ptrCast([*]u8, ptr.?)[0..self.size()];
     }
 
     pub fn getSocketType(self: *Self) [:0]const u8 {
@@ -1139,6 +1156,42 @@ pub const Frame = struct {
         _ = self; _ = T; _ = opt; _ = val;
         @compileError("Currently setOpt does not support any property names");
     }
+
+    /// Share data with `aframe` from this structure.
+    /// Don't modify data after it have been shared with other frames.
+    pub fn share(self: *Self, aframe: *Frame) void {
+        _ = c.zmq_msg_copy(&aframe.raw, &self.raw); // zmq_msg_copy only return error when msg_t is invalid
+    }
+
+    /// Copy data to `frame`. You must ensure `frame` have exact same size to this frame.
+    pub fn copy(self: *Self, frame: *Frame) void {
+        var targetBuf = frame.data();
+        for (self.data()) |ch, i| {
+            targetBuf[i] = ch;
+        }
+    }
+
+    /// Create a duplication. If `alloc` is null, use libzmq's built-in memory management.
+    pub fn dupe(self: *Self, alloc: ?*Allocator) Allocator.Error!Self {
+        var frame: Frame = undefined;
+        if (alloc) |a| {
+            var buf = try a.alloc(u8, self.size());
+            errdefer a.free(buf);
+            frame = try Self.initData(buf, a);
+        } else {
+            frame = try Self.initSize(self.size());
+        }
+        self.copy(&frame);
+        return frame;
+    }
+
+    /// Move contents to `aframe` without copying.
+    pub fn move(self: *Self, aframe: *Frame) void {
+        _ = c.zmq_msg_move(&aframe.raw, &self.raw);
+        aframe._zeroCopyMeta = self._zeroCopyMeta;
+        aframe._closed = self._closed;
+        aframe._beSentFlag = self._beSentFlag;
+    }
 };
 
 test "Frame: initialise and deinitialise" {
@@ -1152,9 +1205,9 @@ test "Frame: initialise and deinitialise" {
         const DATA = "Hello World!";
         var frame = try Frame.initSize(12);
         defer frame.deinit();
-        var data = frame.data().?;
+        var data = frame.data();
         for (DATA) |ch, i| data[i] = ch;
-        try _t.expectEqualStrings(DATA, frame.data().?);
+        try _t.expectEqualStrings(DATA, frame.data());
     }
 
     {
@@ -1162,7 +1215,7 @@ test "Frame: initialise and deinitialise" {
         var buf = try _t.allocator.dupe(u8, DATA);
         var frame = try Frame.initData(buf, _t.allocator);
         defer frame.deinit();
-        try _t.expectEqualStrings(DATA, frame.data().?);
+        try _t.expectEqualStrings(DATA, frame.data());
     }
 }
 
@@ -1178,6 +1231,42 @@ test "Frame: size" {
         var frame = try Frame.initCopy(DATA);
         defer frame.deinit();
         try _t.expectEqual(@as(usize, 17), frame.size());
+    }
+}
+
+test "Frame: share, copy, dupe and move" {
+    const _t = std.testing;
+    const DATA = "Hello World";
+    {
+        var frame = try Frame.initCopy(DATA);
+        defer frame.deinit();
+        var frame1 = Frame.init();
+        defer frame1.deinit();
+        frame.share(&frame1);
+        try _t.expectEqualStrings(DATA, frame1.data());
+    }
+    {
+        var frame = try Frame.initCopy(DATA);
+        defer frame.deinit();
+        var frame1 = try frame.dupe(_t.allocator);
+        defer frame1.deinit();
+        try _t.expectEqualStrings(DATA, frame1.data());
+    }
+    {
+        var frame = try Frame.initCopy(DATA);
+        defer frame.deinit();
+        var frame1 = try frame.dupe(null);
+        defer frame1.deinit();
+        try _t.expectEqualStrings(DATA, frame1.data());
+    }
+    {
+        var frame = try Frame.initCopy(DATA);
+        defer frame.deinit();
+        var frame1 = Frame.init();
+        defer frame1.deinit();
+        frame.move(&frame1);
+        try _t.expectEqual(@as(usize, 0), frame.size());
+        try _t.expectEqualStrings(DATA, frame1.data());
     }
 }
 
@@ -1202,9 +1291,9 @@ test "Frame: recv and send" {
         {
             var frame = try sock1.recvFrameSize(256, .{});
             defer frame.deinit();
-            try _t.expectEqual(@as(usize, 7), frame.data().?.len);
+            try _t.expectEqual(@as(usize, 7), frame.data().len);
             try _t.expectEqual(@as(usize, 7), frame.size());
-            try _t.expectEqualStrings(DATA, frame.data().?);
+            try _t.expectEqualStrings(DATA, frame.data());
         }
     }
     {
@@ -1227,9 +1316,9 @@ test "Frame: recv and send" {
         {
             var frame = try sock1.recvFrameSize(256, .{});
             defer frame.deinit();
-            try _t.expectEqual(@as(usize, 7), frame.data().?.len);
+            try _t.expectEqual(@as(usize, 7), frame.data().len);
             try _t.expectEqual(@as(usize, 7), frame.size());
-            try _t.expectEqualStrings(DATA, frame.data().?);
+            try _t.expectEqualStrings(DATA, frame.data());
         }
     }
 }
@@ -1409,3 +1498,9 @@ test "Poller" {
         }
     }
 }
+
+pub const Message = struct {
+    frames: std.ArrayList(Frame),
+
+
+};
