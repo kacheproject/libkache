@@ -5,6 +5,8 @@ const c = @cImport({
     @cInclude("zmq.h");
 });
 
+const _l = std.log.scoped(.ZMQ);
+
 pub const SNDMORE = c.ZMQ_SNDMORE;
 pub const DONTWAIT = c.ZMQ_DONTWAIT;
 
@@ -72,7 +74,9 @@ fn translateFileError(errno: c_int) FileError {
 }
 
 fn getErrNo() c_int {
-    return c.zmq_errno();
+    var no = c.zmq_errno();
+    _l.warn("getErrorNo(): {} {s}", .{no, c.zmq_strerror(no)});
+    return no;
 }
 
 pub const Context = struct {
@@ -121,6 +125,16 @@ pub const Context = struct {
             };
         }
     }
+
+    /// Create a monitor socket.
+    pub fn monitor(self: *Self, sock: *Socket, events: anytype) (Error||FileError)!Socket {
+        var monitorSock = try self.socket(.Pair);
+        errdefer monitorSock.deinit();
+        var addr = genRandomInprocAddress("monitor-", 63);
+        try sock.startMonitor(&addr, events);
+        try monitorSock.connect(&addr);
+        return monitorSock;
+    }
 };
 
 test "Context: initialise and deinitialise" {
@@ -148,6 +162,8 @@ pub const SockOpt = enum(c_int) {
     CurveSecretKey = c.ZMQ_CURVE_SECRETKEY,
     CurveServer = c.ZMQ_CURVE_SERVER,
     CurverServerKey = c.ZMQ_CURVE_SERVERKEY,
+    SndHWM = c.ZMQ_SNDHWM,
+    RcvHWM = c.ZMQ_RCVHWM,
 
     const Self = @This();
 
@@ -157,7 +173,7 @@ pub const SockOpt = enum(c_int) {
 };
 
 pub const SocketEvent = enum(u16) {
-    Connected = c.ZMQ_EVENT_CONNTECTED,
+    Connected = c.ZMQ_EVENT_CONNECTED,
     Delayed = c.ZMQ_EVENT_CONNECT_DELAYED,
     Retring = c.ZMQ_EVENT_CONNECT_RETRIED,
     Listening = c.ZMQ_EVENT_LISTENING,
@@ -173,6 +189,8 @@ pub const SocketEvent = enum(u16) {
     HandshakeBadProtocol = c.ZMQ_EVENT_HANDSHAKE_FAILED_PROTOCOL,
     HandshakeBadAuth = c.ZMQ_EVENT_HANDSHAKE_FAILED_AUTH,
 };
+
+pub const EVENT_ALL = c.ZMQ_EVENT_ALL;
 
 pub const RawSocket = struct {
     _sock: *c_void,
@@ -356,7 +374,7 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), value.ptr, value.len);
             },
 
-            .ConnectTimeout, .Linger, .UseFD, .Backlog => {
+            .ConnectTimeout, .Linger, .UseFD, .Backlog, .RcvHWM, .SndHWM => {
                 typeAssert(c_int, valueT);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
             },
@@ -490,9 +508,52 @@ pub const RawSocket = struct {
         }
     }
 
-    fn buildSocketEventFlags(events: anytype) c_int {}
+    fn buildSocketEventFlags(events: anytype) c_int {
+        const T = @TypeOf(events);
+        const info = @typeInfo(T);
+        if (info == .Int or info == .ComptimeInt) {
+            return @as(c_int, events);
+        } else if (info == .Struct) {
+            var iflags = @as(c_int, 0);
+            const structInfo = info.Struct;
+            inline for (structInfo.fields) |field| {
+                const value = @field(events, field.name);
+                if (@TypeOf(value) != SocketEvent) @compileError(std.fmt.comptimePrint("expect ScoketEvent, got {}", .{@TypeOf(value)}));
+                iflags |= @enumToInt(value);
+            }
+            return iflags;
+        } else @compileError(std.fmt.comptimePrint("expect tuple of ScoketEvent or any integer, got {}", .{T}));
+    }
 
-    pub fn startMonitor(self: *Self, endpoint: [:0]const u8, events: anytype) Error!Self {
+    /// Start a monitor on `events` and bind to `endpoint`. Caller owns `endpoint`.
+    /// `endpoint` only accepts inproc transport.
+    /// Return `Terminated` when context terminated; `Invalid` when endpoint is invalid.
+    pub fn startMonitor(self: *Self, endpoint: [:0]const u8, events: anytype) Error!void {
+        const iflags = buildSocketEventFlags(events);
+        const stat = c.zmq_socket_monitor(self._sock, endpoint, iflags);
+        if (stat >= 0) {
+            _l.debug("a monitor is started at {s} for events {}", .{endpoint, events});
+        } else {
+            return switch (getErrNo()) {
+                c.ETERM => Error.Terminated,
+                c.EPROTONOSUPPORT => Error.Invalid,
+                c.EINVAL => Error.Invalid,
+                else => unreachable,
+            };
+        }
+    }
+
+    /// Stop the monitor on this socket.
+    pub fn stopMonitor(self: *Self) Error!void {
+        const stat = c.zmq_socket_monitor(self._sock, null, 0);
+        if (stat >= 0) {
+            _l.debug("a monitor is stopped", .{});
+        } else {
+            return switch (getErrNo()) {
+                c.ETERM => Error.Terminated,
+                else => unreachable,
+            };
+        }
     }
 };
 
@@ -728,7 +789,38 @@ pub const Socket = struct {
     pub fn sendEmpty(self: *Self, flags: anytype) IOError!void {
         return self.raw.sendEmpty(flags);
     }
+
+    /// Start a monitor on `endpoint` to listen `events`.
+    /// `events` could be a tuple or integer flags.
+    /// `endpoint` only accepts inproc transport, or Error.Invalid will be return.
+    /// You should not start two or more monitor on one socket, the behaviour is undefined in document.
+    /// `stopMonitor` can be used to stop original monitor.
+    pub fn startMonitor(self: *Self, endpoint: [:0]const u8, events: anytype) Error!void {
+        return try self.raw.startMonitor(endpoint, events);
+    }
+    
+    /// Stop the monitor.
+    pub fn stopMonitor(self: *Self) Error!void {
+        return try self.raw.stopMonitor();
+    }
 };
+
+fn fillBufReadableChars(buf: []u8) void {
+    const RANDTABLE = "0123456789abcdefghijklmnopqrstuvwxyz";
+    for (buf) |*ch| {
+        ch.* = RANDTABLE[std.crypto.random.intRangeLessThan(usize, 0, RANDTABLE.len)];
+    }
+}
+
+pub fn genRandomInprocAddress(prefix: []const u8, comptime size: usize) [size:0]u8 {
+    std.debug.assert(prefix.len+9 <= size);
+    const ADDR_PREFIX = "inproc://";
+    var addrBuf: [size:0]u8 = undefined;
+    fillBufReadableChars(addrBuf[ADDR_PREFIX.len+prefix.len..addrBuf.len]);
+    std.mem.copy(u8, addrBuf[0..ADDR_PREFIX.len], ADDR_PREFIX);
+    std.mem.copy(u8, addrBuf[ADDR_PREFIX.len..ADDR_PREFIX.len+prefix.len], prefix);
+    return addrBuf;
+}
 
 pub fn curvePublic(secretKey: []const u8) [32]u8 {
     std.debug.assert(secretKey.len == 32);
@@ -955,6 +1047,87 @@ test "Socket: sendEmpty" {
     var frame = try sock1.recvFrameSize(1, .{});
     defer frame.deinit();
     try _t.expectEqual(@as(usize, 0), frame.size());
+}
+
+pub const SocketEventLogger = struct {
+    monitor: Socket,
+    monitoredSocket: *Socket,
+    thread: *std.Thread,
+    alloc: *Allocator,
+
+    const Self = @This();
+
+    fn loggerThreadBody(self: *Self) void {
+        const l = std.log.scoped(.ZMQSocketEventLogger);
+        l.info("a socket event logger is started", .{});
+        while (true) {
+            var msg: ?SocketEventMessage = SocketEventMessage.recv(&self.monitor, self.alloc) catch |e| switch (e) {
+                error.OutOfMemory => oom: {
+                    l.crit("could not receive socket event: allocator report OOM", .{});
+                    break :oom null;
+                },
+                else => blk: {
+                    l.err("could not receive socket event: io error {}", .{e});
+                    break :blk null;
+                },
+            };
+            if (msg) |*nnmsg| {
+                defer nnmsg.deinit();
+                l.info("socket event: {} {} \"{s}\"", .{nnmsg.event, nnmsg.value, nnmsg.endpoint.?});
+                if (nnmsg.event == .MonitorStopped) {
+                    break;
+                }
+            }
+        }
+        l.info("a socket event logger is stopped", .{});
+    }
+
+    pub fn init(monitor: Socket, monitoredSocket: *Socket, alloc: *Allocator) (std.Thread.SpawnError||Allocator.Error)!*Self {
+        var result = try alloc.create(Self);
+        errdefer alloc.destroy(result);
+        result.* = Self {
+            .monitor = monitor,
+            .monitoredSocket = monitoredSocket,
+            .thread = undefined,
+            .alloc = alloc,
+        };
+        result.thread = try std.Thread.spawn(loggerThreadBody, result);
+        return result;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.monitoredSocket.stopMonitor() catch {}; // ignore terminated error.
+        self.thread.wait();
+        self.monitor.deinit();
+        self.alloc.destroy(self);
+    }
+};
+
+test "Socket: monitor" {
+    const _t = std.testing;
+    var ctx = try Context.init();
+    defer ctx.deinit();
+    var sock0 = try ctx.socket(.Rep);
+    defer sock0.deinit();
+    var sock1 = try ctx.socket(.Req);
+    defer sock1.deinit();
+    var monitor0 = try ctx.monitor(&sock0, EVENT_ALL);
+    var evlogger = try SocketEventLogger.init(monitor0, &sock0, _t.allocator);
+    defer evlogger.deinit();
+    try sock0.bind("tcp://127.0.0.1:*");
+    var lastEndpoint = try sock0.getLastEndpointAlloc(_t.allocator, 256);
+    defer _t.allocator.free(lastEndpoint);
+    try sock1.connect(lastEndpoint);
+
+    _ = try sock1.sendConst("Hello", .{});
+    _ = try sock0.recvIgnore(.{});
+    _ = try sock0.sendConst("World!", .{});
+    _ = try sock1.recvIgnore(.{});
+
+    // var connectedMsg = try SocketEventMessage.recvEvent(&monitor0);
+    // try monitor0.recvIgnore(.{});
+    // defer connectedMsg.deinit();
+    // try _t.expectEqual(SocketEvent.Connected, connectedMsg.event);
 }
 
 pub const FrameOpt = enum(c_int) {
@@ -1499,8 +1672,60 @@ test "Poller" {
     }
 }
 
-pub const Message = struct {
-    frames: std.ArrayList(Frame),
+pub const SocketEventMessage = struct {
+    event: SocketEvent,
+    value: u32,
+    endpoint: ?[]const u8,
+    alloc: ?*Allocator,
 
+    const Self = @This();
 
+    pub fn init(event: SocketEvent, value: u32, endpoint: []const u8, alloc: ?*Allocator) Self {
+        return Self {
+            .event = event,
+            .value = value,
+            .endpoint = endpoint,
+            .alloc = alloc,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (self.alloc) |alloc| {
+            if (self.endpoint) |endpoint| {
+                alloc.free(endpoint);
+            }
+        }
+    }
+
+    /// Receive the first frame of the socket event message.
+    /// If you don't want to receive the endpoint frame, don't forget to use `Socket.recvIgnore` to ignore the second frame.
+    /// Caution: Bad message will trigger undefined behaviour.
+    pub fn recvEvent(sock: *Socket) IOError!Self {
+        var buf: [6]u8 = undefined;
+        var realSize = try sock.recv(&buf, .{});
+        std.debug.assert(realSize == 6);
+        var packedSlice = std.PackedIntSlice(u8).init(&buf, 6);
+        var evId = packedSlice.slice(0, 2).sliceCast(u16).get(0);
+        var evVal = packedSlice.slice(2, 6).sliceCast(u32).get(0);
+        var event = @intToEnum(SocketEvent, evId);
+        return Self {
+            .event = event,
+            .value = evVal,
+            .endpoint = null,
+            .alloc = null,
+        };
+    }
+
+    /// Receive the whole socket event message, including endpoint (the second frame).
+    /// The endpoint should not be larger thant 2048 bytes, or IOError.FrameTooLarge will be return.
+    /// Tips: this function might allocate 2048 bytes at first, them shrink it to best-fit size.
+    /// You might manually set `alloc` and `endpoint` fields if you don't have much memory.
+    pub fn recv(sock: *Socket, alloc: *Allocator) (IOError||Allocator.Error)!Self {
+        var result = try Self.recvEvent(sock);
+        std.debug.assert(sock.getRcvMore());
+        var endpoint = try sock.recvAlloc(alloc, 2048, .{});
+        result.endpoint = endpoint;
+        result.alloc = alloc;
+        return result;
+    }
 };
