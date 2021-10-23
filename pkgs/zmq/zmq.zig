@@ -1111,9 +1111,8 @@ test "Socket: monitor" {
     defer sock0.deinit();
     var sock1 = try ctx.socket(.Req);
     defer sock1.deinit();
-    var monitor0 = try ctx.monitor(&sock0, EVENT_ALL);
-    var evlogger = try SocketEventLogger.init(monitor0, &sock0, _t.allocator);
-    defer evlogger.deinit();
+    var monitor0 = try ctx.monitor(&sock0, .{SocketEvent.Listening});
+    defer monitor0.deinit();
     try sock0.bind("tcp://127.0.0.1:*");
     var lastEndpoint = try sock0.getLastEndpointAlloc(_t.allocator, 256);
     defer _t.allocator.free(lastEndpoint);
@@ -1124,10 +1123,10 @@ test "Socket: monitor" {
     _ = try sock0.sendConst("World!", .{});
     _ = try sock1.recvIgnore(.{});
 
-    // var connectedMsg = try SocketEventMessage.recvEvent(&monitor0);
-    // try monitor0.recvIgnore(.{});
-    // defer connectedMsg.deinit();
-    // try _t.expectEqual(SocketEvent.Connected, connectedMsg.event);
+    var connectedMsg = try SocketEventMessage.recvEvent(&monitor0);
+    try monitor0.recvIgnore(.{});
+    defer connectedMsg.deinit();
+    try _t.expectEqual(SocketEvent.Listening, connectedMsg.event);
 }
 
 pub const FrameOpt = enum(c_int) {
