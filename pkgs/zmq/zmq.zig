@@ -84,6 +84,11 @@ pub const Context = struct {
 
     const Self = @This();
 
+    pub const Opt = enum (c_int) {
+        Blocky = c.ZMQ_BLOCKY,
+        IOThreads = c.ZMQ_IO_THREADS,
+    };
+
     pub fn init() Error!Self {
         var zctx = c.zmq_ctx_new();
         if (zctx) |ctx| {
@@ -134,6 +139,30 @@ pub const Context = struct {
         try sock.startMonitor(&addr, events);
         try monitorSock.connect(&addr);
         return monitorSock;
+    }
+
+    pub fn setOpt(self: *Self, opt: Opt, comptime T: type, value: T) void {
+        var val = switch (T) {
+            bool => @as(c_int, if (value) 1 else 0),
+            else => switch (@typeInfo(T)) {
+                .ComptimeInt, .Int => value,
+                else => unreachable,
+            },
+        };
+        const stat = c.zmq_ctx_set(self._ctx, @enumToInt(opt), val);
+        if (stat < 0) unreachable;
+    }
+
+    pub fn getOpt(self: *Self, opt: Opt, comptime T: type) T {
+        var val = c.zmq_ctx_get(self._ctx, @enumToInt(opt));
+        if (val == -1) unreachable;
+        return switch (T) {
+            bool => if (val != 0) true else false,
+            else => switch (@typeInfo(T)) {
+                .ComptimeInt, .Int => val,
+                else => unreachable,
+            }
+        };
     }
 };
 
