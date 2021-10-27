@@ -92,68 +92,62 @@ const EventPub = struct {
     }
 
     fn handleIncomeMessage(self: *Self, msg: *EventMessage, r: *Router, currentTime: u64) (zmq.IOError || Allocator.Error)!void {
-        var clkUpdated = false;
-        if (r.clk.canBeUpdated(msg.routerId, msg.clock)) {
+        const clkUpdated = if (r.clk.canBeUpdated(msg.routerId, msg.clock)) updateclk: {
             const oldClk = r.clk.vec.get(msg.routerId);
             _ = try r.clk.update(msg.routerId, msg.clock);
             _l.debug("clock updated for {}: {} -> {}", .{ msg.routerId, oldClk, msg.clock });
-            clkUpdated = true;
+            break :updateclk true;
+        } else false;
+        var peer = try r.netdb.getPeer(msg.routerId);
+        if (msg.peerAddress) |peerAddr| {
+            if (!(msg.isForwarded() or r.netdb.hasWireForPeer(msg.routerId, peerAddr))) {
+                var addr = try r.alloc.create(PhysicalAddress);
+                errdefer r.alloc.destroy(addr);
+                addr.* = PhysicalAddress {
+                    .peerId = msg.routerId,
+                    .address = try r.alloc.dupeZ(u8, peerAddr),
+                };
+                try r.netdb.allAddresses.append(addr);
+                var usrMsg = try r.alloc.alloc(u8, WireFoundEvent.userMessageSize(msg.routerId, peerAddr));
+                WireFoundEvent.buildUserMessage(usrMsg, msg.routerId, peerAddr);
+                try r.publish(WireFoundEvent.NAME, usrMsg, r.alloc);
+            }
         }
-        // rope_events = ticktok | wire_found | wire_down | entry_up | entry_down
-        // ticktok = "_ticktok" router_id router_clk ticktok_msg
-        // ticktok_msg = alive_until_offest(u64) physical_time(u64)
+        peer.aliveUntil = currentTime + peer.aliveOffest;
+        if (msg.peerAddress) |peerAddress| {
+            var paddrs = try r.netdb.lookupByAddress(peerAddress, self.alloc);
+            defer r.alloc.free(paddrs);
+            for (paddrs) |paddr| {
+                paddr.lastReachable = std.math.max(paddr.lastReachable, currentTime);
+                if (paddr.peerId == msg.routerId) {
+                    paddr.promiseReachable = currentTime + peer.aliveOffest;
+                    // If the message is directly sent by the peer, set the promise reachable time to promised time
+                }
+            }
+        }
+        // rope_events = ticktock | wire_found | wire_down | entry_up | entry_down
+        // ticktock = "_ticktock" router_id router_clk ticktok_msg
+        // ticktock_msg = alive_until_offest(u64) physical_time(u64)
         // wire_found = "_wire.found" router_id router_clk wire_info
         // wire_info = peer_router_id(u64) ADDRESS(string)
         // wire_down = "_wire.down" router_id router_clk wire_info
         // entry_up = "_entry.up" router_id router_clk entry_addr
         // entry_down = "_entry.down" router_id router_clk entry_addr
-        if (std.mem.eql(u8, msg.eventName, "_ticktok")) {
+        if (std.mem.eql(u8, msg.eventName, TickTockEvent.NAME)) {
             // ticktok events tell other routers that this router is still alive.
-            var view = TickTokEvent.init(msg);
+            var view = TickTockEvent.init(msg);
             if (!view.isValid()) return;
             const aliveUntilOffest = view.aliveUntilOffest();
             const physicalTime = view.physicalTime();
             if (std.math.approxEqRel(u64, physicalTime, currentTime, 30)) {
-                var peer = r.netdb.getPeer(msg.routerId);
                 const routerAlivePromiseTime = std.math.min(physicalTime, currentTime) + aliveUntilOffest;
                 peer.aliveUntil = routerAlivePromiseTime;
                 peer.lastTickTok = currentTime;
                 peer.aliveOffest = aliveUntilOffest;
-                if (msg.peerAddress) |peerAddr| {
-                    if (!(msg.isForwarded() or r.netdb.hasWireForPeer(msg.routerId, peerAddr))) {
-                        var addr = try r.alloc.create(PhysicalAddress);
-                        addr.* = PhysicalAddress {
-                            .peerId = msg.routerId,
-                            .address = try r.alloc.dupeZ(u8, peerAddr),
-                        };
-                        r.netdb.allAddresses.append(addr);
-                        var usrMsg = try r.alloc.alloc(u8, WireFoundEvent.userMessageSize(msg.routerId, peerAddr));
-                        WireFoundEvent.buildUserMessage(usrMsg, msg.routerId, peerAddr);
-                        try r.publish(WireFoundEvent.NAME, usrMsg, r.alloc);
-                    }
-                }
-                if (msg.peerAddress) |peerAddress| {
-                    var paddrs = try r.netdb.lookupByAddress(peerAddress, self.alloc);
-                    defer r.alloc.free(paddrs);
-                    for (paddrs) |paddr| {
-                        if (paddr.peerId != msg.routerId) {
-                            paddr.lastReachable = std.math.max(paddr.lastReachable, currentTime);
-                            // If the message is being forwarded, at least we know the forwarder is alive at the moment.
-                        } else {
-                            paddr.lastReachable = routerAlivePromiseTime;
-                            // If the message is directly sent by the peer, set the last reachable time to promised time
-                        }
-                    }
-                }
-                var routerAddrs = try r.netdb.lookupById(msg.routerId, false, r.alloc);
-                defer self.alloc.free(routerAddrs);
-                for (routerAddrs) |paddr| {
-                    paddr.lastReachable = routerAlivePromiseTime;
-                }
             } else {
                 _l.warn("peer {}, the difference of physical time is larger than 30s from local time. (local: {})", .{ msg.routerId, physicalTime, currentTime });
             }
-        } else if (std.mem.eql(u8, msg.eventName, "_wire.found")) {
+        } else if (std.mem.eql(u8, msg.eventName, WireFoundEvent.NAME)) {
             var view = WireFoundEvent.init(msg);
             if (view.isValid()) {
                 // update wire infomation
@@ -170,8 +164,13 @@ const EventPub = struct {
                     }
                 }
             }
-        } else if (std.mem.eql(u8, msg.eventName, "_wire.down")) {
-            // TODO: handle wire down
+        } else if (std.mem.eql(u8, msg.eventName, WireDownEvent.NAME)) {
+            var view = WireDownEvent.init(msg);
+            if (view.isValid()) {
+                if (r.netdb.getWireForPeer(view.peerRouterId(), view.address())) |wireAddrO| {
+                    wireAddrO.lastDismiss = currentTime;
+                }
+            }
         } else if (std.mem.eql(u8, msg.eventName, "_entry.up")) {
             // TODO: handle entry up
         } else if (std.mem.eql(u8, msg.eventName, "_entry.down")) {
@@ -310,12 +309,50 @@ pub const WireFoundEvent = struct {
     }
 };
 
-pub const TickTokEvent = struct {
+pub const WireDownEvent = struct {
     msg: *EventMessage,
 
     const Self = @This();
 
-    pub const NAME = "_ticktok";
+    pub const NAME = "_wire.found";
+
+    pub fn init(msg: *EventMessage) Self {
+        return Self {.msg = msg};
+    }
+
+    pub fn isValid(self: *Self) bool {
+        return std.mem.eql(u8, NAME, self.msg.eventName) and self.msg.userMessage.len > 8;
+    }
+
+    pub fn peerRouterId(self: *Self) u64 {
+        return pn.fromPortableInt(std.PackedIntSlice(u8).init(self.msg.userMessage[0..8]).sliceCast(u64).get(0));
+    }
+
+    pub fn setPeerRouterId(self: *Self, val: u64) void {
+        std.PackedIntSlice(u8).init(self.msg.userMessage[0..8]).sliceCast(u64).set(0, pn.toPortableInt(val));
+    }
+
+    pub fn address(self: *Self) []const u8 {
+        return self.msg.userMessage[8..self.msg.userMessage.len];
+    }
+
+    pub fn userMessageSize(peerRouterId: u64, address: []const u8) usize {
+        return 8+address.len;
+    }
+
+    pub fn buildUserMessage(buf: []u8, peerRouterId: u64, address: []const u8) []const u8 {
+        std.mem.copy(u8, buf[8..buf.len], address);
+        std.PackedIntSlice(u8).init(buf[0..8]).sliceCast(u64).set(0, peerRouterId);
+        return buf[0..8+address.len-1];
+    }
+};
+
+pub const TickTockEvent = struct {
+    msg: *EventMessage,
+
+    const Self = @This();
+
+    pub const NAME = "_ticktock";
 
     pub fn init(msg: *EventMessage) Self {
         return Self {.msg = msg};
@@ -361,6 +398,8 @@ const PhysicalAddress = struct {
     alloc: ?*Allocator,
     lastReachable: u64 = 0,
     lastFound: u64 = 0,
+    lastDismiss: u64 = 0,
+    promiseReachable: u64 = 0,
 
     const Self = @This();
 
@@ -378,7 +417,11 @@ const PhysicalAddress = struct {
     }
 
     pub fn maybeReachable(self: *Self, time: u64) bool {
-        return (std.math.max(self.lastReachable, time) - std.math.min(self.lastReachable, time)) > 0;
+        return (time < self.promiseReachable) and ((std.math.max(self.lastReachable, time) - std.math.min(self.lastReachable, time)) > 0);
+    }
+
+    pub fn isFound(self: *Self) bool {
+        return self.lastDismiss < self.lastFound;
     }
 };
 
@@ -387,6 +430,17 @@ const Peer = struct {
     aliveUntil: u64 = 0,
     aliveOffest: u64 = 0,
     lastTickTok: u64 = 0,
+    physicalTimeOffest: i8 = 0, // Offest could not > 30s
+
+    const Self = @This();
+
+    pub fn getRemoteTime(self: *Self, localTime: u64) u64 {
+        return localTime + self.physicalTimeOffest;
+    }
+
+    pub fn setTimeOffest(self: *Self, remoteTime: u64, localTime: u64) void {
+        self.physicalTimeOffest = remoteTime - localTime;
+    }
 };
 
 const Entry = struct {
