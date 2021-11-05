@@ -167,7 +167,6 @@ pub const Context = struct {
 };
 
 test "Context: initialise and deinitialise" {
-    const _t = std.testing;
     var ctx = try Context.init();
     ctx.deinit();
 }
@@ -340,7 +339,7 @@ pub const RawSocket = struct {
 
     /// Copy the buf by the C allocator and send as a frame though socket.
     /// Caller owns `buf`.
-    pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.IOError | IOError)!usize {
+    pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.Error || IOError)!usize {
         var copy = try std.heap.c_allocator.dupe(u8, buf);
         return try self.send(copy, flags);
     }
@@ -500,7 +499,7 @@ pub const RawSocket = struct {
                 else => return e,
             };
             if (result) |realResult| {
-                return result;
+                return realResult;
             } else {
                 currentSize += 512;
                 buf = try alloc.realloc(buf, currentSize);
@@ -675,7 +674,7 @@ pub const Socket = struct {
 
     /// Copy `buf` into a memory block allocated by C allocator and send.
     /// Caller owns `buf`.
-    pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.Error | IOError)!usize {
+    pub fn sendCopy(self: *Self, buf: []const u8, flags: anytype) (Allocator.Error || IOError)!usize {
         return try self.raw.sendCopy(buf, flags);
     }
 
@@ -708,17 +707,16 @@ pub const Socket = struct {
         return try self.raw.recvAlloc(alloc, maxsize, flags);
     }
 
-    /// Receive a exact value from socket.
+    /// Receive a exact value from socket. Return FrameTooLarge if the received data size is not fit. 
     /// Warning: the method just receive data and write them into memory. The data might not be portable.
-    pub fn recvValue(self: *Self, comptime V: type, flags: anytype) IOError!?V {
-        std.debug.assert(@typeInfo(V) != .Pointer);
+    pub fn recvValue(self: *Self, comptime V: type, flags: anytype) IOError!V {
         const size = @sizeOf(V);
-        var buf = [_]u8{0} * size;
-        const recvSize = try self.recv(buf, flags);
+        var buf: [size]u8 = undefined;
+        const recvSize = try self.recv(&buf, flags);
         if (recvSize == size) {
-            return @ptrCast(*V, buf.ptr).*;
+            return @ptrCast(*V, @alignCast(@alignOf(*V), &buf)).*;
         } else {
-            return null;
+            return IOError.FrameTooLarge;
         }
     }
 
@@ -904,19 +902,17 @@ test "curvePublic and TEST_*_*KEY" {
 }
 
 test "curveGenerateSecretKey" {
-    const _t = std.testing;
     {
         var key0 = curveGenerateSecretKey();
-        var pk0 = curvePublic(&key0);
+        _ = curvePublic(&key0);
     }
 }
 
 test "Socket: initialise and deinitialise" {
-    const _t = std.testing;
     var ctx = try Context.init();
     defer ctx.deinit();
     var sock = try ctx.socket(.Pair);
-    sock.deinit();
+    defer sock.deinit();
 }
 
 test "Socket: send and recv" {
@@ -1180,7 +1176,7 @@ pub const Frame = struct {
     /// Initialise frame.
     pub fn init() Self {
         var raw = std.mem.zeroes(c.zmq_msg_t);
-        const stat = c.zmq_msg_init(&raw);
+        _ = c.zmq_msg_init(&raw);
         return Self{
             .raw = raw,
         };
@@ -1222,7 +1218,7 @@ pub const Frame = struct {
         return frame;
     }
 
-    fn zmqAutoFreeFn(d: ?*c_void, hint: ?*c_void) callconv(.C) void {
+    fn zmqAutoFreeFn(_: ?*c_void, hint: ?*c_void) callconv(.C) void {
         var meta = @ptrCast(*align(1) Self.ZeroCopyMeta, hint.?);
         meta.alloc.free(meta.slice);
         meta.alloc.destroy(meta);
@@ -1625,13 +1621,15 @@ pub const Poller = struct {
     }
 
     pub fn rm(self: *Self, socket: *Socket) void {
-        const i = for (self.pollItems.items) |item, i| blk: {
+        var i: usize = undefined;
+        for (self.pollItems.items) |item, index| {
             if (item.socket == socket.raw._sock) {
-                break :blk i;
+                i = index;
+                break;
             }
-        };
-        self.pollItems.orderedRemove(i);
-        self.mapping.orderedRemove(socket.raw._sock);
+        } else unreachable;
+        _ = self.pollItems.orderedRemove(i);
+        _ = self.mapping.orderedRemove(socket.raw._sock);
     }
 
     pub fn findNextEvent(self: *Self) ?PollEvent {
