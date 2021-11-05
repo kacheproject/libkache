@@ -1,6 +1,6 @@
 /// Zig
 const std = @import("std");
-const sqlite = @import("sqlite");
+const sqlite = @import("pkgs/sqlite/sqlite.zig");
 const kssid = @import("./kssid.zig");
 
 const ArrayList = std.ArrayList;
@@ -138,12 +138,13 @@ const SqliteKV = struct {
         return self.keysAlloc(self.alloc);
     }
 
-    pub fn keysCount(self: *Self, alloc: *Allocator) !u64 {
-        const query = std.fmt.allocPrintZ(
-            self.alloc,
-            "SELECT DISTINCT key FROM {s} ORDER BY created_at ASC, id ASC WHERE value != NULL;",
-            .{self.name},
-        );
+    pub fn keysCount(self: *Self) !u64 {
+        var allKeys = try self.keys(); // TODO: better proformance impl in sql
+        defer {
+            for (allKeys.items) |k| self.free(k);
+            allKeys.deinit();
+        }
+        return allKeys.items.len;
     }
 };
 
@@ -225,6 +226,18 @@ test "SqliteKV.set can hide the value by set null" {
     try _t.expect(val == null);
 }
 
+test "SqliteKV.keysCount counts all keys in store" {
+    const _t = std.testing;
+    var db = try createMemoryDatabase();
+    var kv = SqliteKV.init(&db, "test_table", _t.allocator);
+    const KEYS = .{ "name0", "name1", "name2", "name0" };
+    try kv.ensure();
+    inline for (KEYS) |k| {
+        try kv.set(k, "value");
+    }
+    try _t.expectEqual(@as(u64, 3), try kv.keysCount());
+}
+
 pub const Keys = enum {
     username,
     host,
@@ -264,7 +277,9 @@ pub const Profile = struct {
         self.alloc.free(val);
     }
 
-    pub fn deinit(self: *Self) void {}
+    pub fn deinit(self: *Self) void {
+        self.db.deinit();
+    }
 
     pub fn ensure(self: *Self) !void {
         if (try self.getVersion()) |version| {
