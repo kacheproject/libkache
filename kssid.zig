@@ -46,13 +46,15 @@ pub const Generator = struct {
     }
 
     pub fn generate(self: *Self) u64 {
-        return generateKSSID(&self.rng.random);
+        var random = if (@typeInfo(@TypeOf(self.rng.random)) == .BoundFn)
+            &self.rng.random() // changed in 0.9.0+dev.1561 or earlier
+            else
+            &self.rng.random;
+        return generateKSSID(random);
     }
 };
 
 test "Generator.generate() can generate different number in each call" {
-    const expectEqual = std.testing.expectEqual;
-    const expectError = std.testing.expectError;
     const expect = std.testing.expect;
 
     var gen = Generator.init();
