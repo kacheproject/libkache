@@ -34,29 +34,33 @@ pub const VecClock = struct {
         if (self.vec.contains(k)) {
             var oldClk = self.vec.get(k);
             if (clk > oldClk.?) {
-                try self.vec.put(clk);
+                try self.vec.put(k, clk);
                 return true;
             } else {
                 return false;
             }
         } else {
-            try self.vec.put(clk);
+            try self.vec.put(k, clk);
             return true;
         }
     }
 
     pub fn myClk(self: *Self) u64 {
-        if (self.vec.get(self.myid)) |myclk| {
-            return myclk;
+        return self.myClkPtr().*;
+    }
+
+    pub fn myClkPtr(self: *Self) *u64 {
+        if (self.vec.getPtr(self.myid)) |clk| {
+            return clk;
         } else {
-            return 0;
+            unreachable;
         }
     }
 
-    pub fn increment(self: *Self, offest: u64) void {
-        var oldVal = self.vec.get(self.myid).?;
+    pub fn increment(self: *Self, offest: u64) u64 {
+        var oldVal = self.myClk();
         var val = oldVal + offest;
-        self.vec.put(val) catch unreachable; // the key-value pair have been exists
+        self.myClkPtr().* = val;
         return val;
     }
 };
