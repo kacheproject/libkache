@@ -24,7 +24,8 @@ fn reserveInt(comptime T: type, n: T) T {
     var arr = std.PackedIntArray(T, 1).initAllTo(n).sliceCast(u8);
     var buf = std.PackedIntArray(T, 1).initAllTo(n).sliceCast(u8);
     for (buf.bytes) |*c, i| {
-        c.* = arr.bytes[arr.len()-i-1];
+        const length = if (@typeInfo(@TypeOf(arr.len)) == .BoundFn) arr.len() else arr.len;
+        c.* = arr.bytes[length-i-1];
     }
     return buf.sliceCast(T).get(0);
 }
