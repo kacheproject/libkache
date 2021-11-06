@@ -6,4 +6,4 @@
 	url = https://github.com/kacheproject/zig-sqlite.git
 [submodule "pkgs/uri"]
 	path = pkgs/uri
-	url = https://github.com/MasterQ32/zig-uri.git
+	url = https://github.com/kacheproject/zig-uri.git
