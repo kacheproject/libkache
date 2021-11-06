@@ -1,6 +1,3 @@
-[submodule "sam3/libsam3"]
-	path = sam3/libsam3
-	url = https://github.com/kacheproject/libsam3.git
 [submodule "autopkg"]
 	path = autopkg
 	url = https://github.com/kacheproject/autopkg.git
