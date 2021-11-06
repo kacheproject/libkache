@@ -8,6 +8,11 @@ const pn = @import("pn.zig");
 const _l = std.log.scoped(.Rope);
 
 const URI_MAX_LENGTH = 2048;
+const DEFAULT_LEASE_TIME = 10; // seconds
+
+fn getLeaseRenewTime(leaseTime: u64) u64 {
+    return @floatToInt(u64, @intToFloat(f64, leaseTime) * 0.7);
+}
 
 // event = event_name flags(u8) router_id clock user_message
 const EventPub = struct {
@@ -100,7 +105,7 @@ const EventPub = struct {
         } else if (socket == &self.zPubOutMonitor) {
             var msg = try zmq.SocketEventMessage.recv(&self.zPubOutMonitor, router.alloc);
             defer msg.deinit();
-            _l.info("socket: {} {} endpoint={s}", .{msg.event, msg.value, msg.endpoint.?});
+            _l.warn("socket: {} {} endpoint={s}", .{msg.event, msg.value, msg.endpoint.?});
         } else {
             try proxyMessage(&self.zXPub, &self.zXSub, EventMessage.USERMSG_MAXSIZE);
             // TODO: optz this case, XPub only send subscribes message out
@@ -118,6 +123,7 @@ const EventPub = struct {
         var peer = try r.netdb.getPeer(msg.routerId);
         if (msg.peerAddress) |peerAddr| {
             if (!(msg.isForwarded() or r.netdb.hasWireForPeer(msg.routerId, peerAddr))) {
+                _l.info("discover new peer address: {s}", .{peerAddr});
                 var addr = try r.alloc.create(PhysicalAddress);
                 errdefer r.alloc.destroy(addr);
                 addr.* = PhysicalAddress {
@@ -650,6 +656,7 @@ pub const Router = struct {
         };
         var me = try result.netdb.getPeer(id); // ensure me peer exists
         me.aliveUntil = std.math.maxInt(u64);
+        me.aliveOffest = DEFAULT_LEASE_TIME;
         result.eventPub = try EventPub.init(&result.zctx, result);
         try result.zEvSideListen.subscribe("");
         try result.addEventPubSocketPolls();
@@ -678,25 +685,18 @@ pub const Router = struct {
         return self.netdb.getPeer(self.myid) catch unreachable;
     }
 
-    fn sendTickTok(self: *Self, currentTime: u64) (Allocator.Error || zmq.IOError)!void {
-        const aliveOffest = @as(u64, 12);
+    fn sendTickTock(self: *Self, currentTime: u64) (Allocator.Error || zmq.IOError)!void {
+        var me = self.getMePeer();
+        me.lastTickTock = currentTime; // Put here to prevent the _poll run it again while this method running
+        const aliveOffest = @as(u64, me.aliveOffest);
         const args = std.PackedIntArray(u64, 2).init(.{ pn.toPortableInt(u64, aliveOffest), pn.toPortableInt(u64, posixTimestamp()) }).sliceCast(u8);
         var buf = try self.alloc.dupe(u8, args.bytes);
         try self.publish(try self.alloc.dupe(u8, "_ticktok"), buf, self.alloc);
-        self.getMePeer().lastTickTock = currentTime;
     }
 
     fn handleSideListen(self: *Self, currentTime: u64) (zmq.IOError || Allocator.Error)!void {
-        var msg = EventMessage.recv(&self.zEvSideListen, self.alloc) catch |e| switch (e) {
-            EventMessage.Error.BadMessage => {
-                return;
-            },
-            error.OutOfMemory => return @errSetCast(Allocator.Error, e),
-            else => return @errSetCast(zmq.IOError, e),
-        };
-        defer msg.deinit();
-        _ = currentTime;
-        // TODO: if no action should be taken here, remove side listen socket
+        _ = currentTime; _ = self;
+        // TODO: remove side listen
     }
 
     /// Publish a message though event pub.
@@ -712,9 +712,10 @@ pub const Router = struct {
 
     fn _poll(self: *Self, timeout: c_int) !?zmq.PollEvent { // TODO: fill the error set
         var currentTime = posixTimestamp();
+        var me = self.getMePeer();
         // Do daily routine
-        if (currentTime - self.getMePeer().lastTickTock >= 9) {
-            try self.sendTickTok(currentTime);
+        if (currentTime - me.lastTickTock >= getLeaseRenewTime(me.aliveOffest)) {
+            try self.sendTickTock(currentTime);
         }
         if (try self.poller.wait(timeout)) |pollev| {
             var sock = pollev.socket;
@@ -740,7 +741,7 @@ pub const Router = struct {
 
 pub const RouterCtl = struct {
     cmd: Command,
-    address: ?[]const u8 = undefined,
+    address: ?[:0]const u8 = undefined,
     result: ?Result = null,
 
     const Self = @This();
@@ -751,7 +752,6 @@ pub const RouterCtl = struct {
     };
 
     pub const Command = enum {
-        EventPubBind,
         EventPubConnect,
         Stop,
     };
@@ -800,7 +800,13 @@ pub const RouterThread = struct {
                             _ = ctlServer.sendConstValue(*RouterCtl, &ctl, .{}) catch |e| _lt.err("reply error: {}", .{e});
                             break;
                         },
-                        else => unreachable,
+                        .EventPubConnect => {
+                            var addr = ctl.address.?;
+                            ctl.result = RouterCtl.Result.Ok;
+                            _lt.info("notify event pub to connect {s}", .{ctl.address.?});
+                            router.eventPub.outConnect(addr) catch |e| {ctl.result = RouterCtl.Result {.Err = e};}; // TODO: use secure tunnel
+                            _ = ctlServer.sendConstValue(*RouterCtl, &ctl, .{}) catch |e| _lt.err("reply error: {}", .{e});
+                        },
                     }
                 }
             }
@@ -837,9 +843,7 @@ pub const RouterThread = struct {
         };
         var ctlPtr = &ctl;
         _ = self.ctlClient.sendConstValue(*RouterCtl, &ctlPtr, .{}) catch unreachable;
-        if (self.ctlClient.recvValue(*RouterCtl, .{}) catch null) |rctl| {
-            std.debug.assert(rctl.result.? == .Ok);
-        }
+        _ = self.ctlClient.recvIgnore(.{}) catch unreachable;
     }
 
     pub fn deinit(self: *Self) void {
@@ -848,6 +852,21 @@ pub const RouterThread = struct {
         self.ctlClient.deinit();
         self.ctlServer.deinit();
         self.router.alloc.destroy(self);
+    }
+
+    pub fn connect(self: *Self, addr: [:0]const u8) !void {
+        var ctl = RouterCtl {
+            .cmd = .EventPubConnect,
+            .address = addr,
+        };
+        var ctlPtr = &ctl;
+        _ = self.ctlClient.sendConstValue(*RouterCtl, &ctlPtr, .{}) catch unreachable;
+        if (self.ctlClient.recvValue(*RouterCtl, .{}) catch null) |rctl| {
+            const result = rctl.result.?;
+            if (result == .Err) {
+                return result.Err;
+            }
+        } else unreachable;
     }
 };
 
@@ -868,6 +887,39 @@ test "RouterThread spawn and stop" {
     defer router.deinit();
     var rThread = try RouterThread.spawn(router);
     defer rThread.deinit();
+}
+
+test "Router can know each other" {
+    const _t = std.testing;
+    const kssid = @import("kssid.zig");
+    var gen = kssid.Generator.init();
+    const r0Id = gen.generate();
+    var r0 = try Router.init(r0Id, _t.allocator);
+    defer r0.deinit();
+    const r1Id = gen.generate();
+    var r1 = try Router.init(r1Id, _t.allocator);
+    defer r1.deinit();
+    var rT0 = try RouterThread.spawn(r0);
+    defer rT0.deinit();
+    var rT1 = try RouterThread.spawn(r1);
+    defer rT1.deinit();
+    const uri = @import("pkgs/uri/uri.zig");
+    var r0EndpointUri = try uri.parse(r0.eventPub.bindingEndpoints.items[0]);
+    var r0EndpointUriStr = try std.fmt.allocPrintZ(_t.allocator, "tcp://127.0.0.1:{}", .{r0EndpointUri.port.?});
+    defer _t.allocator.free(r0EndpointUriStr);
+    try rT1.connect(r0EndpointUriStr);
+    const t1 = posixTimestamp();
+    while (true) {
+        const t2 = posixTimestamp();
+        if (t2 - t1 > 20) {
+            return error.TestTimeout;
+        }
+        if(r0.netdb.hasPeer(r1Id)) {
+            std.log.notice("discover cost {}s", .{t2-t1});
+            break;
+        }
+        std.time.sleep(std.time.ns_per_ms);
+    }
 }
 
 export fn rope_router_new(id: u64) ?*Router {
