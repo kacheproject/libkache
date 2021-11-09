@@ -31,14 +31,22 @@ fn reserveInt(comptime T: type, n: T) T {
 }
 
 pub fn fromPortableInt(comptime T: type, n: T) T {
-    return switch (builtin.cpu.arch.endian()) {
-        .Big => n,
-        .Little => reserveInt(T, n),
-    };
+    if (@hasDecl(std.mem, "nativeToBig")) {
+        return std.mem.nativeToBig(T, n);
+    } else {
+        return switch (builtin.cpu.arch.endian()) {
+            .Big => n,
+            .Little => reserveInt(T, n),
+        };
+    }
 }
 
 pub fn toPortableInt(comptime T: type, n: T) T {
-    return fromPortableInt(T, n);
+    if (@hasDecl(std.mem, "toNative")) {
+        return std.mem.toNative(T, n, .Big);
+    } else {
+        return fromPortableInt(T, n);
+    }
 }
 
 test "PortableInt" {
