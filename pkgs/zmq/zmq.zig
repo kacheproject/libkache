@@ -1218,6 +1218,14 @@ pub const Frame = struct {
         return frame;
     }
 
+    /// Initialise frame with `val`. `val` will be copied to heap by allocator or libzmq if `alloc` is non-null or not.
+    pub fn initValue(comptime T: type, val: *T, alloc: ?*Allocator) Allocator.Error!Self {
+        var frame = if (alloc) |nalloc| try Self.initData(try nalloc.alloc(u8, @sizeOf(T)), nalloc) else try Self.initSize(@sizeOf(T));
+        errdefer frame.deinit();
+        std.mem.copy(u8, frame.data(), @ptrCast([*]u8, val)[0..@sizeOf(T)]);
+        return frame;
+    }
+
     fn zmqAutoFreeFn(_: ?*c_void, hint: ?*c_void) callconv(.C) void {
         var meta = @ptrCast(*align(1) Self.ZeroCopyMeta, hint.?);
         meta.alloc.free(meta.slice);
@@ -1258,6 +1266,15 @@ pub const Frame = struct {
     pub fn data(self: *Self) []u8 {
         var ptr = c.zmq_msg_data(&self.raw);
         return @ptrCast([*]u8, ptr.?)[0..self.size()];
+    }
+
+    /// Return a copy of the data as specific type.
+    /// It will trigger undefined behaviour if the received length is differ from expected.
+    /// It's not recommended to read normal structure in zig, because of zig's auto optimised structure layouts.
+    /// You should use packed structure.
+    pub fn readValue(self: *Self, comptime T: type) T {
+        std.debug.assert(@sizeOf(T) == self.size());
+        return @ptrCast(*T, @alignCast(@alignOf(*T), self.data().ptr)).*;
     }
 
     pub fn getSocketType(self: *Self) [:0]const u8 {
@@ -1413,6 +1430,13 @@ test "Frame: initialise and deinitialise" {
         var frame = try Frame.initData(buf, _t.allocator);
         defer frame.deinit();
         try _t.expectEqualStrings(DATA, frame.data());
+    }
+
+    {
+        var DATA = @as(isize, -1);
+        var frame = try Frame.initValue(isize, &DATA, _t.allocator);
+        defer frame.deinit();
+        try _t.expectEqual(DATA, frame.readValue(isize));
     }
 }
 
@@ -1753,5 +1777,143 @@ pub const SocketEventMessage = struct {
         result.endpoint = endpoint;
         result.alloc = alloc;
         return result;
+    }
+};
+
+/// Toolkit structure to deal with multi-part messages.
+pub const Msg = struct {
+    frame: Frame,
+    next: ?*Self,
+    selfAllocator: ?*Allocator = null,
+
+    const Self = @This();
+
+    pub fn init(frame: Frame) Self {
+        return Self {
+            .frame = frame,
+            .next = null,
+        };
+    }
+
+    pub fn initPtr(frame: Frame, alloc: *Allocator) Allocator.Error!*Self {
+        var obj = try alloc.create(Self);
+        obj.* = Self.init(frame);
+        obj.selfAllocator = alloc;
+        return obj;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.frame.deinit();
+        if (self.selfAllocator) |alloc| {
+            alloc.destroy(self);
+        }
+    }
+
+    pub fn deinitAll(self: *Self) void {
+        var next = self.next;
+        self.deinit();
+        if (next) |nnext| {
+            nnext.deinitAll();
+        }
+    }
+
+    /// Get the next nth message.
+    /// `0` means this message.
+    pub fn getNext(self: *Self, n: usize) ?*Self {
+        if (n == 0) {
+            return self;
+        } else {
+            if (self.next) |nextf| {
+                return nextf.getNext(n-1);
+            } else {
+                return null;
+            }
+        }
+    }
+
+    pub fn countFrames(self: *Self) usize {
+        var count = 0;
+        var curr = self;
+        while (curr) |f| {
+            count += 1;
+            curr = f.next;
+        }
+        return count;
+    }
+
+    pub fn getEnd(self: *Self) *Self {
+        var curr = self;
+        while (curr.next) |nextf| {
+            curr = nextf;
+        }
+        return curr;
+    }
+
+    /// Append a frame with `data` and `alloc` to the end of this message.
+    /// Callee owns `data`.
+    pub fn appendData(self: *Self, data: []const u8, alloc: *Allocator) Allocator.Error!*Self {
+        var frame = try Frame.initData(data, alloc);
+        errdefer frame.deinit();
+        return try self.appendFrame(frame, alloc);
+    }
+
+    pub fn appendFrame(self: *Self, frame: Frame, alloc: *Allocator) Allocator.Error!*Self {
+        var msg = try Msg.initPtr(frame, alloc);
+        errdefer msg.deinit();
+        while (true) {
+            var eof = self.getEnd();
+            if (@cmpxchgWeak(?*Msg, &eof.next, null, msg, .SeqCst, .SeqCst) == null) break;
+        }
+        return msg;
+    }
+
+    pub fn appendEmpty(self: *Self, alloc: *Allocator) Allocator.Error!void {
+        var emptyf = Frame.init();
+        return try self.appendFrame(emptyf, alloc);
+    }
+
+    pub fn appendValue(self: *Self, comptime T: type, val: T, alloc: *Allocator) Allocator.Error!*Self {
+        var frame = try Frame.initValue(T, val, alloc);
+        errdefer frame.deinit();
+        return self.appendFrame(frame, alloc);
+    }
+
+    pub fn sendBy(self: *Self, socket: *Socket, flags: anytype) IOError!void {
+        const realFlags = RawSocket.buildFlags(flags) | (if (self.next) |_| SNDMORE else 0);
+        _ = try socket.sendFrame(&self.frame, realFlags);
+        if (self.next) |nextMsg| {
+            return nextMsg.sendBy(socket, flags);
+        }
+    }
+
+    /// Receive frames.
+    /// Note that the `alloc` is only used to allocate memory for the structure itself.
+    /// The memory used by data will be allocated by libzmq.
+    pub fn recvFrom(socket: *Socket, flags: anytype, alloc: *Allocator) (IOError||Allocator.Error)!*Msg {
+        var frame = Frame.init();
+        errdefer frame.deinit();
+        _ = try socket.recvFrame(&frame, flags);
+        var msg = try Self.initPtr(frame, alloc);
+        errdefer msg.deinit();
+        if (socket.getRcvMore()) {
+            msg.next = try Self.recvFrom(socket, flags, alloc);
+        }
+        return msg;
+    }
+
+    pub fn chain(items: []Self) void {
+        for (items) |*item, i| {
+            if (i > 0) {
+                items[i-1].next = item;
+            }
+        }
+    }
+
+    pub fn chainPtrs(items: []*Self) void {
+        for (items) |item, i| {
+            if (i > 0) {
+                items[i-1].next = item;
+            }
+        }
     }
 };
