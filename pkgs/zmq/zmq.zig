@@ -1860,10 +1860,7 @@ pub const Msg = struct {
     pub fn appendFrame(self: *Self, frame: Frame, alloc: *Allocator) Allocator.Error!*Self {
         var msg = try Msg.initPtr(frame, alloc);
         errdefer msg.deinit();
-        while (true) {
-            var eof = self.getEnd();
-            if (@cmpxchgWeak(?*Msg, &eof.next, null, msg, .SeqCst, .SeqCst) == null) break;
-        }
+        self.attach(msg);
         return msg;
     }
 
@@ -1876,6 +1873,13 @@ pub const Msg = struct {
         var frame = try Frame.initValue(T, val, alloc);
         errdefer frame.deinit();
         return self.appendFrame(frame, alloc);
+    }
+
+    pub fn attach(self: *Self, msg: *Msg) void {
+        while (true) {
+            var eof = self.getEnd();
+            if (@cmpxchgWeak(?*Msg, &eof.next, null, msg, .SeqCst, .SeqCst) == null) break;
+        }
     }
 
     pub fn sendBy(self: *Self, socket: *Socket, flags: anytype) IOError!void {
