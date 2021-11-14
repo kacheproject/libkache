@@ -192,11 +192,13 @@ pub const SockOpt = enum(c_int) {
     CurverServerKey = c.ZMQ_CURVE_SERVERKEY,
     SndHWM = c.ZMQ_SNDHWM,
     RcvHWM = c.ZMQ_RCVHWM,
+    ProbeRouter = c.ZMQ_PROBE_ROUTER,
+    // Don't forget add it to `RawSocket.setOpt` if it's able to be set.
 
     const Self = @This();
 
     pub fn getOriginal(self: *const Self) c_int {
-        return @bitCast(c_int, self.*);
+        return @enumToInt(self);
     }
 };
 
@@ -407,7 +409,7 @@ pub const RawSocket = struct {
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &value, @sizeOf(valueT));
             },
 
-            .ReqCorrelate, .CurveServer => {
+            .ReqCorrelate, .CurveServer, .ProbeRouter => {
                 typeAssert(bool, valueT);
                 const flag = @as(c_int, if (value) 1 else 0);
                 result = c.zmq_setsockopt(self._sock, opt.getOriginal(), &flag, @sizeOf(c_int));
