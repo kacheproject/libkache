@@ -7,19 +7,22 @@ pub fn package(name: []const u8, path: []const u8) autopkg.AutoPkgI {
 
 fn selfPackage(name: []const u8, path: []const u8, skipTest: bool) autopkg.AutoPkgI {
     const sqlite = @import("pkgs/sqlite/build.zig");
-    const zmq = @import("pkgs/zmq/build.zig");
     return autopkg.genExport(autopkg.AutoPkg{
         .name = name,
         .path = path,
         .rootSrc = "kache.zig",
         .dependencies = &.{
-            autopkg.accept(sqlite.package("sqlite", "pkgs/sqlite", .{})),
-            autopkg.accept(zmq.package("zmq", "pkgs/zmq", .{})),
+            autopkg.accept(sqlite.package("sqlite", "pkgs/sqlite", .{
+                .useBundledSQLite = true,
+            })),
         },
         .linkLibC = true,
         .doNotTest = skipTest,
         .testSrcs = &.{
-            "rope.zig",
+            "wg.zig",
+        },
+        .linkSystemLibs = &.{
+            "sodium",
         },
     });
 }
