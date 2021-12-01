@@ -9,15 +9,6 @@ const std = @import("std");
 
 const time = std.time;
 
-fn getRnd() std.rand.Gimli {
-    const seedBufLen = std.rand.DefaultCsprng.secret_seed_length / (128/8);
-    var seedBuf = [_]u128{0} ** seedBufLen;
-    for (seedBuf) |*n| {
-        n.* = @bitCast(u128, time.nanoTimestamp()); // (Rubicon: ) The sign mark doesn't matter
-    }
-    return std.rand.DefaultCsprng.init(@bitCast([std.rand.DefaultCsprng.secret_seed_length]u8, seedBuf));
-}
-
 const EPOCH_START = @as(i64, 14e8);
 
 fn generateKSSID(rng: *std.rand.Random) u64 {
@@ -35,22 +26,18 @@ fn generateKSSID(rng: *std.rand.Random) u64 {
 }
 
 pub const Generator = struct {
-    rng: std.rand.Gimli,
+    rng: std.rand.Random,
 
     const Self = @This();
     
     pub fn init() Self {
         return Self {
-            .rng = getRnd(),
+            .rng = std.crypto.random.*,
         };
     }
 
     pub fn generate(self: *Self) u64 {
-        var random = if (@typeInfo(@TypeOf(self.rng.random)) == .BoundFn)
-            &self.rng.random() // changed in 0.9.0+dev.1561 or earlier
-            else
-            &self.rng.random;
-        return generateKSSID(random);
+        return generateKSSID(&self.rng);
     }
 };
 
