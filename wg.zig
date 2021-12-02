@@ -19,49 +19,20 @@ const c = @cImport({
 const nativeEndianess = builtin.cpu.arch.endian();
 
 const RP = struct {
-    // RP (16 bytes) = ver(u8) target_id(u64) target_port(u16) flags(u8) length(u32)
+    // RP (16 bytes) = ver(u8) target_id(u64) target_port(u16) src_id(u64) src_port(u16) flags(u8) length(u16)
     const HEADER_SIZE: usize = 16;
 
     const VERISON: u8 = 0x1;
 
-    const Header = struct {
+    const Header = packed struct { // Always use big-endiness
+        ver: u8 = VERISON,
         targetId: u64,
         targetPort: u16,
+        srcId: u64,
+        srcPort: u64,
         flags: u8,
-        length: u32,
+        length: u16,
     };
-
-    fn buildHeader(header: Header) [HEADER_SIZE]u8 {
-        var buf = mem.zeroes([HEADER_SIZE]u8);
-        buf[0] = VERISON;
-        std.PackedIntSlice(u64).init(buf[1..9], 8).set(0, mem.nativeToBig(u64, header.targetId));
-        std.PackedIntSlice(u16).init(buf[9..11], 2).set(0, mem.nativeToBig(header.targetPort));
-        std.PackedIntSlice(u32).init(buf[12..16], 4).set(0, mem.nativeToBig(u32, header.length));
-        buf[11] = header.flags;
-        return buf;
-    }
-
-    const ParsingError = error {
-        BadHeader,
-    };
-
-    fn parse(buf: []const u8) ParsingError!Header {
-        if (buf.len >= HEADER_SIZE) {
-            const ver = buf[0];
-            if (ver == VERISON) {
-                const targetId = std.PackedIntSliceEndian(u64, .Big).init(buf[1..9], 8).get(0);
-                const targetPort = std.PackedIntSliceEndian(u16, .Big).init(buf[9..11], 2).get(0);
-                const flags = buf[11];
-                const length = std.PackedIntSlice(u32, .Big).init(buf[12..16], 4).get(0);
-                return Header {
-                    .targetId = targetId,
-                    .targetPort = targetPort,
-                    .flags = flags,
-                    .length = length,
-                };
-            } else return ParsingError.BadHeader;
-        } else return ParsingError.BadHeader;
-    }
 };
 
 const utils = struct {
@@ -144,26 +115,6 @@ const utils = struct {
         return buf;
     }
 
-    fn kdf(comptime n: usize, buf: *[n*32]u8, key: []const u8, input: []const u8) [n][]const u8 {
-        var results: [n][]const u8 = undefined;
-        for (results) |*s, i| {
-            const start = i * 32;
-            const end = (i+1)*32;
-            if (i == 0) {
-                s.* = hmac(buf[start..end], key, input);
-            } else if (i == 1) {
-                const iInput = std.PackedIntArray(u32, 1).initAllTo(1).bytes;
-                s.* = hmac(buf[start..end], key, iInput);
-            } else {
-                var concated: [40]u8 = undefined;
-                std.mem.copy(u8, concated[0..32], results[i-1]);
-                std.mem.copy(u8, concated[32..40], std.PackedIntArray(u64, 1).initAllTo(i).bytes);
-                s.* = hmac(buf[start..end], key, concated);
-            }
-        }
-        return results;
-    }
-
     fn timestamp(nanosec: ?i128) [12]u8 {
         const original = std.math.absCast(nanosec orelse std.time.nanoTimestamp());
         const secPart = @divTrunc(original, std.time.ns_per_s);
@@ -209,6 +160,34 @@ const utils = struct {
 pub const PublicKey = [32]u8;
 
 pub const PrivateKey = [32]u8;
+
+// Rubicon: Why I don't use packed struct here? I'd like to if I could, but zig compiler is lack of fixing bugs.
+// I don't want to criticise these good guys who contributed to such open source project,
+// but they are always making breaking changes while leaving critical bugs in packed struct for months.
+// I do know people love working on new things, as I do. But leave critical bugs, which break key functions, for six months?
+// See: https://github.com/ziglang/zig/issues?q=is%3Aissue+is%3Aopen+packed+struct+label%3Abug+sort%3Acreated-asc
+// See: the long comment inside `Peer.handshakeInit`.
+pub const HandshakeInitialisation = extern struct {
+    msgType: u8,
+    reserved: [3]u8 = .{0, 0, 0},
+    senderIndex: u32,
+    unencryptedEphemeral: [32]u8,
+    encryptedStatic: [32+16]u8,
+    encryptedTimestamp: [12+16]u8,
+    mac1: [16]u8,
+    mac2: [16]u8,
+};
+
+pub const HandshakeResponse = extern struct {
+    msgType: u8,
+    reserved: [3]u8 = .{0, 0, 0},
+    senderIndex: u32,
+    receiverIndex: u32,
+    unencryptedEphemeral: [32]u8,
+    encryptedNothing: [0+16]u8,
+    mac1: [16]u8,
+    mac2: [16]u8,
+};
 
 pub const Peer = struct {
     publicKey: PublicKey,
@@ -304,27 +283,41 @@ pub const Peer = struct {
     pub const HANDSHAKE_INIT_MSG_SIZE = 148;
     pub const HANDSHAKE_RESPONSE_MSG_SIZE = 92;
 
-    pub const HandshakeInitialisation = packed struct {
-        msgType: u8,
-        reserved: [3]u8 = .{0, 0, 0},
-        senderIndex: u32,
-        unencryptedEphemeral: [32]u8,
-        encryptedStatic: [32+16]u8,
-        encryptedTimestamp: [12+16]u8,
-        mac1: [16]u8,
-        mac2: [16]u8,
-    };
 
-
-    pub fn handshakeInit(self: *Self, buf: *HandshakeInitialisation, options: HandshakeInitOptions) ![]const u8 {
+    pub fn handshakeInit(self: *Self, options: HandshakeInitOptions) !HandshakeInitialisation {
+        var buf: HandshakeInitialisation = undefined;
         var state = self.resetHandshake();
         var hash: *[32]u8 = &state.hash;
         var cK: *[32]u8 = &state.chainingKey;
+        _ = state; _ = cK; _ = hash; _ = options;
         mem.copy(u8, cK, utils.CONSTRUCTION_HASH);
         hash = utils.hashParts(hash, .{utils.CONSTRUCTION_HASH_AND_IDENTIFIER_THEN_HASH, &self.publicKey});
         buf.msgType = 0x1;
         buf.senderIndex = mem.nativeToLittle(u32, self.senderId);
-        mem.copy(u8, &buf.unencryptedEphemeral, &state.ephemeralKeypair.public);
+        {
+            // Bug: directly use '&'' for pointer of buf.unencryptedEphemeral cause compiler crash:
+            // * thread #1, name = 'zig', stop reason = signal SIGSEGV: invalid address (fault address: 0x0)
+            //   * frame #0: 0x0000000007462904 zig`llvm::PointerType::get(llvm::Type*, unsigned int) + 20
+            //     frame #1: 0x000000000342a35c zig`llvm::GetElementPtrInst::getGEPReturnType(llvm::Type*, llvm::Value*, llvm::ArrayRef<llvm::Value*>) + 76
+            //     frame #2: 0x0000000003440dae zig`llvm::IRBuilderBase::CreateInBoundsGEP(llvm::Type*, llvm::Value*, llvm::ArrayRef<llvm::Value*>, llvm::Twine const&) + 270
+            //     frame #3: 0x00000000073819ec zig`LLVMBuildInBoundsGEP + 76
+            //     frame #4: 0x00000000032d5502 zig`ir_render(CodeGen*, ZigFn*) + 1618
+            //     frame #5: 0x00000000032cab8b zig`do_code_gen(CodeGen*) + 2171
+            //     frame #6: 0x00000000032c7eae zig`codegen_build_object(CodeGen*) + 3310
+            //     frame #7: 0x00000000032bff28 zig`zig_stage1_build_object + 2392
+            //     frame #8: 0x0000000002f96213 zig`Compilation.processOneJob + 78307
+            //     frame #9: 0x0000000002f7907c zig`Compilation.update + 4268
+            //     frame #10: 0x0000000002f39aaf zig`main.updateModule + 31
+            //     frame #11: 0x0000000002f0f185 zig`main.buildOutputType + 78757
+            //     frame #12: 0x0000000002ef0df4 zig`main + 2212
+            //     frame #13: 0x000000000762fd3a zig`libc_start_main_stage2 + 41
+            //     frame #14: 0x0000000002eef5b6 zig`_start + 22
+            mem.copy(u8, &buf.unencryptedEphemeral, &state.ephemeralKeypair.public);
+            // Rubicon: I fix it though using 'extern struct' with C ABI. It's a bug in packed struct if it have array.
+            // Don't delete my comment, leave it for history unless this piece of code should be deleted. And, yes, I am ANGRY (See the comment above `HandshakeInitialisation`).
+            // I'd like to see how long it takes before they fix this bug. (I saw one issue from six months ago in 2 Dec. 2021)
+            // @memcpy(&buf.unencryptedEphemeral, &state.ephemeralKeypair.public, 32);
+        }
         hash = utils.hashParts(hash, .{hash, &buf.unencryptedEphemeral});
         cK = utils.hmac(cK, cK, &buf.unencryptedEphemeral);
         cK = utils.hmac(cK, cK, &.{0x1});
@@ -342,42 +335,29 @@ pub const Peer = struct {
         hash = utils.hashParts(hash, .{hash, &buf.encryptedTimestamp});
         // Update mac1 and mac2
         _ = utils.hashParts(&temp, .{utils.LABEL_MAC1, &self.publicKey});
-        _ = utils.mac(@ptrCast(*[16]u8, &buf.mac1), &temp, @ptrCast([*]u8, buf)[0..@sizeOf(HandshakeInitialisation)-32]);
+        _ = utils.mac(@ptrCast(*[16]u8, &buf.mac1), &temp, @ptrCast([*]u8, &buf)[0..@sizeOf(HandshakeInitialisation)-32]);
         if (state.cookie) |*cookie| {
             if ((cookie.receivedTime + 120) > std.time.timestamp()) {
-                _ = utils.mac(@ptrCast(*[16]u8, &buf.mac2), &cookie.taste, @ptrCast([*]u8, buf)[0..@sizeOf(HandshakeInitialisation)-16]);
+                _ = utils.mac(@ptrCast(*[16]u8, &buf.mac2), &cookie.taste, @ptrCast([*]u8, &buf)[0..@sizeOf(HandshakeInitialisation)-16]);
             } else {
                 std.crypto.utils.secureZero(u8, &buf.mac2);
             }
         }
-        return @ptrCast([*]const u8, buf)[0..@sizeOf(HandshakeInitialisation)];
+        return buf;
     }
 
     pub const HandshakeRespondOptions = struct {
-        // senderId: [4]u8,
-        // chainingKey: *[32]u8,
-        // Received handshake initialising message, we need update the states just like the peer did.
-        // `chainingKey` is the C_r in the section 5.4.2
         responderPubKey: *const PublicKey,
         responderPriKey: *const PrivateKey,
     };
 
-    pub const HandshakeResponse = packed struct {
-        msgType: u8,
-        reserved: [3]u8 = .{0, 0, 0},
-        senderIndex: u32,
-        receiverIndex: u32,
-        unencryptedEphemeral: [32]u8,
-        encryptedNothing: [0+16]u8,
-        mac1: [16]u8,
-        mac2: [16]u8,
-    };
-
-    pub fn handshakeRespond(self: *Self, buf: *HandshakeResponse, initialMsg: *HandshakeInitialisation, options: HandshakeRespondOptions) ![]const u8 {
-        assert(initialMsg.msgType == 0x1);
+    pub fn handshakeRespond(self: *Self, initialMsg: *HandshakeInitialisation, options: HandshakeRespondOptions) !HandshakeResponse {
+        var buf: HandshakeResponse = undefined;
+        // assert(initialMsg.msgType == 0x1);
         var state = self.resetHandshake();
         var hash = &state.hash;
         var cK = &state.chainingKey;
+        _ = state; _= hash; _ = cK; _ = options; _ = initialMsg;
         // Sync states with initiator
         mem.copy(u8, cK, utils.CONSTRUCTION_HASH);
         hash = utils.hashParts(hash, .{utils.CONSTRUCTION_HASH_AND_IDENTIFIER_THEN_HASH, options.responderPubKey});
@@ -423,10 +403,10 @@ pub const Peer = struct {
         hash = utils.hashParts(hash, .{hash, &buf.encryptedNothing});
         // Update mac1 and mac2
          _ = utils.hashParts(&temp, .{utils.LABEL_MAC1, &self.publicKey});
-        _ = utils.mac(@ptrCast(*[16]u8, &buf.mac1), &temp, @ptrCast([*]u8, buf)[0..@sizeOf(HandshakeResponse)-32]);
+        _ = utils.mac(@ptrCast(*[16]u8, &buf.mac1), &temp, @ptrCast([*]u8, &buf)[0..@sizeOf(HandshakeResponse)-32]);
         if (state.cookie) |*cookie| {
             if ((cookie.receivedTime + 120) > std.time.timestamp()) {
-                _ = utils.mac(@ptrCast(*[16]u8, &buf.mac2), &cookie.taste, @ptrCast([*]u8, buf)[0..@sizeOf(HandshakeInitialisation)-16]);
+                _ = utils.mac(@ptrCast(*[16]u8, &buf.mac2), &cookie.taste, @ptrCast([*]u8, &buf)[0..@sizeOf(HandshakeInitialisation)-16]);
             } else {
                 std.crypto.utils.secureZero(u8, &buf.mac2);
             }
@@ -446,13 +426,14 @@ pub const Peer = struct {
         mem.copy(u8, &shakedState.sendingKey, &temp2);
         mem.copy(u8, &shakedState.receivingKey, &temp3);
         self.handshake = HandshakeState {.Shaked = shakedState};
-        return @ptrCast([*]const u8, buf)[0..@sizeOf(HandshakeResponse)];
+        return buf;
     }
 
     pub fn receiveHandshakeResponse(self: *Self, msg: *HandshakeResponse) !void {
         var state = self.handshake.Shaking;
         var cK: *[32]u8 = &state.chainingKey;
         var hash: *[32]u8 = &state.hash;
+        _ = state; _ = cK; _ = hash; _ = msg;
         state.receiverId = mem.littleToNative(u32, msg.senderIndex);
         hash = utils.hashParts(hash, .{hash, &msg.unencryptedEphemeral});
         cK = utils.hmac(cK, cK, &msg.unencryptedEphemeral);
@@ -484,6 +465,14 @@ pub const Peer = struct {
         mem.copy(u8, &shakedState.receivingKey, &temp3);
         self.handshake = HandshakeState {.Shaked = shakedState};
     }
+
+    pub fn send(self: *Self) []const u8 {
+        _ = self;
+    }
+
+    pub fn receive(self: *Self) ![]const u8 {
+        _ = self;
+    }
 };
 
 test "Peer can correctly handshake" {
@@ -494,13 +483,11 @@ test "Peer can correctly handshake" {
     var bobKeyP = try std.crypto.dh.X25519.KeyPair.create(null);
     var alice = Peer.init(aliceKeyP.public_key, idgen.generate(), 1, null);
     var bob = Peer.init(bobKeyP.public_key, idgen.generate(), 2, null);
-    var handshakeInit: Peer.HandshakeInitialisation = undefined;
-    _ = try alice.handshakeInit(&handshakeInit, .{
+    var handshakeInit: HandshakeInitialisation = try alice.handshakeInit(.{
         .initiatorPubKey = &bobKeyP.public_key,
         .initiatorPriKey = &bobKeyP.secret_key,
     });
-    var handshakeResponse: Peer.HandshakeResponse = undefined;
-    _ = try bob.handshakeRespond(&handshakeResponse, &handshakeInit, .{
+    var handshakeResponse = try bob.handshakeRespond(&handshakeInit, .{
         .responderPriKey = &aliceKeyP.secret_key,
         .responderPubKey = &aliceKeyP.public_key,
     });
