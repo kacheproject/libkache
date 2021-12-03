@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const crypto = @import("crypto.zig");
+const print = std.debug.print;
 
 fn assert(ok: bool) void {
     if (builtin.mode == .Debug) {
@@ -426,11 +427,12 @@ pub const Peer = struct {
         cK = utils.hmac(cK, &temp, &.{0x1});
         _ = utils.hmacParts(&key, &temp, .{cK, &.{0x2}});
         _ = try utils.aead(&buf.encryptedStatic, &key, 0, options.initiatorPubKey, hash);
+        hash = utils.hashParts(hash, .{hash, &buf.encryptedStatic});
         _ = utils.hmac(&temp, cK, &utils.dh(options.initiatorPriKey, &self.publicKey));
         cK = utils.hmac(cK, &temp, &.{0x1});
         _ = utils.hmacParts(&key, &temp, .{cK, &.{0x2}});
         var timestamp = utils.timestamp(null);
-        _ = try utils.aead(&buf.encryptedTimestamp, &key, 0, &timestamp, &state.hash);
+        _ = try utils.aead(&buf.encryptedTimestamp, &key, 0, &timestamp, hash);
         hash = utils.hashParts(hash, .{hash, &buf.encryptedTimestamp});
         // Update mac1 and mac2
         _ = utils.hashParts(&temp, .{utils.LABEL_MAC1, &self.publicKey});
@@ -465,20 +467,21 @@ pub const Peer = struct {
         cK = utils.hmac(cK, cK, &.{0x1});
         var temp: [32]u8 = undefined;
         var key: [32]u8 = undefined;
-        _ = utils.hmac(&temp, cK, &utils.dh(options.responderPriKey, @ptrCast(*[32]u8, &initialMsg.unencryptedEphemeral)));
+        _ = utils.hmac(&temp, cK, &utils.dh(options.responderPriKey, &initialMsg.unencryptedEphemeral));
         cK = utils.hmac(cK, &temp, &.{0x1});
-        _ = utils.hashParts(&key, .{cK, &.{0x2}});
+        _ = utils.hmacParts(&key, &temp, .{cK, &.{0x2}});
         var decryptedStatic: [32]u8 = undefined;
         _ = try utils.deaead(&decryptedStatic, &key, 0, &initialMsg.encryptedStatic, hash);
-        if (mem.eql(u8, &decryptedStatic, options.responderPubKey)) {
+        if (!mem.eql(u8, &decryptedStatic, &self.publicKey)) {
             return error.BadKey; // TODO: Use specific error set
         }
         hash = utils.hashParts(hash, .{hash, &initialMsg.encryptedStatic});
         _ = utils.hmac(&temp, cK, &utils.dh(options.responderPriKey, &decryptedStatic));
         cK = utils.hmac(cK, &temp, &.{0x1});
-        _ = utils.hashParts(&key, .{cK, &.{0x2}});
+        _ = utils.hmacParts(&key, &temp, .{cK, &.{0x2}});
         var decryptedTimestamp: [12]u8 = undefined;
         _ = try utils.deaead(&decryptedTimestamp, &key, 0, &initialMsg.encryptedTimestamp, hash);
+        hash = utils.hashParts(hash, .{hash, &initialMsg.encryptedTimestamp});
         state.receiverId = mem.littleToNative(u32, initialMsg.senderIndex); // TODO: remove this swap for performance
         // Fill response
         buf.msgType = 0x2;
@@ -488,7 +491,7 @@ pub const Peer = struct {
         hash = utils.hashParts(hash, .{hash, &buf.unencryptedEphemeral});
         cK = utils.hmac(cK, cK, &buf.unencryptedEphemeral);
         cK = utils.hmac(cK, cK, &.{0x1});
-        cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, @ptrCast(*[32]u8, &initialMsg.unencryptedEphemeral)));
+        cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, &initialMsg.unencryptedEphemeral));
         cK = utils.hmac(cK, cK, &.{0x1});
         cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, &self.publicKey));
         cK = utils.hmac(cK, cK, &.{0x1});
@@ -528,7 +531,7 @@ pub const Peer = struct {
         return buf;
     }
 
-    pub fn receiveHandshakeResponse(self: *Self, msg: *HandshakeResponse) !void {
+    pub fn receiveHandshakeResponse(self: *Self, msg: *HandshakeResponse, options: HandshakeInitOptions) !void {
         var state = self.handshake.Shaking;
         var cK: *[32]u8 = &state.chainingKey;
         var hash: *[32]u8 = &state.hash;
@@ -537,16 +540,20 @@ pub const Peer = struct {
         hash = utils.hashParts(hash, .{hash, &msg.unencryptedEphemeral});
         cK = utils.hmac(cK, cK, &msg.unencryptedEphemeral);
         cK = utils.hmac(cK, cK, &.{0x1});
-        cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, @ptrCast(*[32]u8, &msg.unencryptedEphemeral)));
+        cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, &msg.unencryptedEphemeral));
         cK = utils.hmac(cK, cK, &.{0x1});
-        cK = utils.hmac(cK, cK, &utils.dh(&state.ephemeralKeypair.private, &self.publicKey));
+        cK = utils.hmac(cK, cK, &utils.dh(options.initiatorPriKey, &msg.unencryptedEphemeral));
         cK = utils.hmac(cK, cK, &.{0x1});
         const presharedKey = mem.zeroes([32]u8); // We don't use pre-shared key now.
         var temp: [32]u8 = undefined;
         _ = utils.hmac(&temp, cK, &presharedKey);
         cK = utils.hmac(cK, &temp, &.{0x1});
         var temp2: [32]u8 = undefined;
+        var key: [32]u8 = undefined;
+        _ = utils.hmacParts(&key, &temp, .{&temp2, &.{0x3}});
         hash = utils.hashParts(hash, .{hash, &temp2});
+        var nothingBuf: [1]u8 = undefined;
+        _ = try utils.deaead(&nothingBuf, &key, 0, &msg.encryptedNothing, hash);
         hash = utils.hashParts(hash, .{hash, &msg.encryptedNothing});
         // Update state to Shaked
         var shakedState = ShakedState {
@@ -590,7 +597,10 @@ test "Peer can correctly handshake" {
         .responderPriKey = &aliceKeyP.secret_key,
         .responderPubKey = &aliceKeyP.public_key,
     });
-    try alice.receiveHandshakeResponse(&handshakeResponse);
+    try alice.receiveHandshakeResponse(&handshakeResponse, .{
+        .initiatorPubKey = &bobKeyP.public_key,
+        .initiatorPriKey = &bobKeyP.secret_key,
+    });
     try t.expectEqualStrings(&alice.handshake.Shaked.sendingKey, &bob.handshake.Shaked.sendingKey);
     try t.expectEqualStrings(&alice.handshake.Shaked.receivingKey, &bob.handshake.Shaked.receivingKey);
 }
