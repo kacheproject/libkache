@@ -35,6 +35,42 @@ const RP = struct {
     };
 };
 
+pub const TAI64N = struct {
+    secPart: u64,
+    nanoPart: u32,
+
+
+    fn init(nanoTimestamp: i128) TAI64N {
+        const original = std.math.absCast(nanoTimestamp);
+        const secPart = @intCast(u64, @divTrunc(original, std.time.ns_per_s));
+        const nanoPart = @intCast(u32, original - (@intCast(u128, secPart) * std.time.ns_per_s));
+        return TAI64N {
+            .secPart = secPart,
+            .nanoPart = nanoPart,
+        };
+    }
+
+    fn now() TAI64N {
+        return TAI64N.init(std.time.nanoTimestamp());
+    }
+
+    fn cast(timestamp: [12]u8) TAI64N {
+        var secPart = std.PackedIntSliceEndian(u8, .Big).init(timestamp[0..8], 8).sliceCastEndian(u64, nativeEndianess).get(0);
+        var nanoPart = std.PackedIntSliceEndian(u8, .Big).init(timestamp[8..12], 4).sliceCastEndian(u32, nativeEndianess).get(1);
+        return TAI64N {
+            .secPart = secPart,
+            .nanoPart = nanoPart,
+        };
+    }
+
+    fn data(self: TAI64N) [12]u8 {
+        var buf: [12]u8 = undefined;
+        mem.writeInt(u64, buf[0..8], self.secPart, .Big);
+        mem.writeInt(u32, buf[8..12], self.nanoPart, .Big);
+        return buf;
+    }
+};
+
 const utils = struct {
     const CONSTRUCTION = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s";
     const IDENTIFIER = "WireGuard v1 zx2c4 Jason@zx2c4.com";
@@ -116,14 +152,8 @@ const utils = struct {
     }
 
     fn timestamp(nanosec: ?i128) [12]u8 {
-        const original = std.math.absCast(nanosec orelse std.time.nanoTimestamp());
-        const secPart = @divTrunc(original, std.time.ns_per_s);
-        const nanoPart = @intCast(u32, original - (@intCast(u128, secPart) * std.time.ns_per_s));
-        var buf: [12]u8 = undefined;
-        var slice = std.PackedIntSliceEndian(u8, .Big).init(&buf, 12);
-        slice.sliceCastEndian(u64, nativeEndianess).set(0, @intCast(u64, secPart));
-        slice.sliceCastEndian(u32, nativeEndianess).set(3, nanoPart);
-        return buf;
+        const ts: TAI64N = if (nanosec) |nsec| TAI64N.init(nsec) else TAI64N.now();
+        return ts.data();
     }
 
     fn aead(buf: []u8, key: []const u8, counter: u64, plain: []const u8, auth: []const u8) ![]const u8 {
