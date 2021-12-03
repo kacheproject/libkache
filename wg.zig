@@ -190,13 +190,63 @@ pub const PublicKey = [32]u8;
 
 pub const PrivateKey = [32]u8;
 
+fn fillFromStruct(value: anytype, buf: []u8) []const u8 {
+    var ptr = @as(usize, 0);
+    inline for (comptime std.meta.fields(@TypeOf(value))) |field| {
+        const F = field.field_type;
+        const fSize = @sizeOf(F);
+        var fPtr = @ptrCast(*F, buf[ptr..ptr+fSize].ptr);
+        fPtr.* = @field(value, field.name);
+        ptr += fSize;
+    }
+    return buf[0..ptr];
+}
+
+test "fillFromStruct can fill buffer from structure in order" {
+    const TempStructure = struct {
+        a: [8]u8,
+        b: [3]u8,
+    };
+    var obj = TempStructure {
+        .a = .{0, 1, 2, 3, 4, 5, 6, 7},
+        .b = .{0, 1, 2},
+    };
+    var buf: [11]u8 = undefined;
+    var sli = fillFromStruct(obj, &buf);
+    try std.testing.expectEqualSlices(u8, &.{0,1,2,3,4,5,6,7,0,1,2}, sli);
+}
+
+fn readToStruct(comptime T: type, buf: []const u8) T {
+    var o = mem.zeroes(T);
+    var ptr = @as(usize, 0);
+    inline for (comptime std.meta.fields(T)) |field| {
+        const F = field.field_type;
+        const fSize = @sizeOf(F);
+        var fPtr = @ptrCast(*const F, buf[ptr..ptr+fSize].ptr);
+        @field(o, field.name) = fPtr.*;
+        ptr += fSize;
+    }
+    return o;
+}
+
+test "readToStruct can read buffer to structure in order" {
+    const TempStructure = struct {
+        a: [8]u8,
+        b: [3]u8,
+    };
+    var buf: [11]u8 = .{0,1,2,3,4,5,6,7,0,1,2};
+    var sli = readToStruct(TempStructure, &buf);
+    try std.testing.expectEqualSlices(u8, &.{0,1,2,3,4,5,6,7}, &sli.a);
+    try std.testing.expectEqualSlices(u8, &.{0,1,2}, &sli.b);
+}
+
 // Rubicon: Why I don't use packed struct here? I'd like to if I could, but zig compiler is lack of fixing bugs.
 // I don't want to criticise these good guys who contributed to such open source project,
 // but they are always making breaking changes while leaving critical bugs in packed struct for months.
 // I do know people love working on new things, as I do. But leave critical bugs, which break key functions, for six months?
 // See: https://github.com/ziglang/zig/issues?q=is%3Aissue+is%3Aopen+packed+struct+label%3Abug+sort%3Acreated-asc
 // See: the long comment inside `Peer.handshakeInit`.
-pub const HandshakeInitialisation = extern struct {
+pub const HandshakeInitialisation = struct {
     msgType: u8,
     reserved: [3]u8 = .{0, 0, 0},
     senderIndex: u32,
@@ -205,9 +255,19 @@ pub const HandshakeInitialisation = extern struct {
     encryptedTimestamp: [12+16]u8,
     mac1: [16]u8,
     mac2: [16]u8,
+
+    const Self = @This();
+
+    pub fn fill(self: Self, buf: []u8) []const u8 {
+        return fillFromStruct(self, buf);
+    }
+
+    pub fn read(buf: []u8) Self {
+        return readToStruct(Self, buf);
+    }
 };
 
-pub const HandshakeResponse = extern struct {
+pub const HandshakeResponse = struct {
     msgType: u8,
     reserved: [3]u8 = .{0, 0, 0},
     senderIndex: u32,
@@ -216,6 +276,16 @@ pub const HandshakeResponse = extern struct {
     encryptedNothing: [0+16]u8,
     mac1: [16]u8,
     mac2: [16]u8,
+
+    const Self = @This();
+
+    pub fn fill(self: Self, buf: []u8) []const u8 {
+        return fillFromStruct(self, buf);
+    }
+
+    pub fn read(buf: []u8) Self {
+        return readToStruct(Self, buf);
+    }
 };
 
 pub const Peer = struct {
@@ -342,7 +412,7 @@ pub const Peer = struct {
             //     frame #13: 0x000000000762fd3a zig`libc_start_main_stage2 + 41
             //     frame #14: 0x0000000002eef5b6 zig`_start + 22
             mem.copy(u8, &buf.unencryptedEphemeral, &state.ephemeralKeypair.public);
-            // Rubicon: I fix it though using 'extern struct' with C ABI. It's a bug in packed struct if it have array.
+            // Rubicon: I fix it. It's a bug in packed struct if it have array.
             // Don't delete my comment, leave it for history unless this piece of code should be deleted. And, yes, I am ANGRY (See the comment above `HandshakeInitialisation`).
             // I'd like to see how long it takes before they fix this bug. (I saw one issue from six months ago in 2 Dec. 2021)
             // @memcpy(&buf.unencryptedEphemeral, &state.ephemeralKeypair.public, 32);
