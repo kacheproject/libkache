@@ -156,11 +156,11 @@ const utils = struct {
         return ts.data();
     }
 
+    // the counter will be converted to little-endiness
     fn aead(buf: []u8, key: []const u8, counter: u64, plain: []const u8, auth: []const u8) ![]const u8 {
         var nonce = mem.zeroes([8]u8);
         {
-            const nonceCounter = std.PackedIntArray(u64, 1).initAllTo(mem.nativeToLittle(u64, counter)).bytes;
-            mem.copy(u8, &nonce, &nonceCounter);
+            mem.writeInt(u64, &nonce, counter, .Little);
         }
         return try crypto.aead.encrypt(.Chacha20Poly1305, .{
             .secret = buf,
@@ -174,8 +174,7 @@ const utils = struct {
     fn deaead(buf: []u8, key: []const u8, counter: u64, secret: []const u8, auth: []const u8) ![]const u8 {
         var nonce = mem.zeroes([8]u8);
         {
-            const nonceCounter = std.PackedIntArray(u64, 1).initAllTo(mem.nativeToLittle(u64, counter)).bytes;
-            mem.copy(u8, &nonce, &nonceCounter);
+            mem.writeInt(u64, &nonce, counter, .Little);
         }
         return try crypto.aead.decrypt(.Chacha20Poly1305, .{
             .secret = secret,
