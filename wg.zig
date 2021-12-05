@@ -567,8 +567,8 @@ pub const Peer = struct {
         _ = utils.hmac(&temp2, &temp, &.{0x1});
         var temp3: [32]u8 = undefined;
         _ = utils.hmacParts(&temp3, &temp, .{&temp2, &.{0x2}});
-        mem.copy(u8, &shakedState.sendingKey, &temp2);
-        mem.copy(u8, &shakedState.receivingKey, &temp3);
+        mem.copy(u8, &shakedState.sendingKey, &temp3);
+        mem.copy(u8, &shakedState.receivingKey, &temp2);
         self.handshake = HandshakeState {.Shaked = shakedState};
     }
 
