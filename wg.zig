@@ -158,7 +158,7 @@ const utils = struct {
     }
 
     // the counter will be converted to little-endiness
-    fn aead(buf: []u8, key: []const u8, counter: u64, plain: []const u8, auth: []const u8) ![]const u8 {
+    fn aead(buf: []u8, key: []const u8, counter: u64, plain: []const u8, auth: ?[]const u8) ![]const u8 {
         var nonce = mem.zeroes([8]u8);
         {
             mem.writeInt(u64, &nonce, counter, .Little);
@@ -172,7 +172,7 @@ const utils = struct {
         });
     }
 
-    fn deaead(buf: []u8, key: []const u8, counter: u64, secret: []const u8, auth: []const u8) ![]const u8 {
+    fn deaead(buf: []u8, key: []const u8, counter: u64, secret: []const u8, auth: ?[]const u8) ![]const u8 {
         var nonce = mem.zeroes([8]u8);
         {
             mem.writeInt(u64, &nonce, counter, .Little);
@@ -572,12 +572,44 @@ pub const Peer = struct {
         self.handshake = HandshakeState {.Shaked = shakedState};
     }
 
-    pub fn send(self: *Self) []const u8 {
-        _ = self;
+    /// Make a data packet. `data` should padded to ensure the length is multiple of 16 bytes.
+    // The length of buffer should be at least data's length + 32.
+    pub fn sendRaw(self: *Self, buf: []u8, data: []const u8) ![]const u8 {
+        assert(data.len % 16 == 0);
+        var header: [16]u8 = undefined;
+        header[0] = 0x4;
+        mem.set(u8, header[1..4], 0);
+        mem.writeInt(u32, header[4..8], self.handshake.Shaked.receiverId, .Little);
+        self.handshake.Shaked.sendingKeyCounter += 1;
+        const counter = self.handshake.Shaked.sendingKeyCounter;
+        mem.writeInt(u64, header[8..16], counter, .Little);
+        _ = try utils.aead(buf[16..data.len+32], &self.handshake.Shaked.sendingKey, counter, data, null);
+        mem.copy(u8, buf[0..16], &header);
+        return buf[0..data.len+32];
     }
 
-    pub fn receive(self: *Self) ![]const u8 {
-        _ = self;
+    pub const ReceiveError = error {
+        BadReceiver,
+        BadCounter,
+        Crypto,
+    };
+
+    pub fn receiveRaw(self: *Self, buf: []u8, packet: []const u8) ReceiveError![]const u8 {
+        assert(packet.len % 16 == 0);
+        assert(packet[0] == 0x4);
+        var receiverId = mem.readInt(u32, packet[4..8], .Little);
+        if (receiverId != self.senderId) {
+            return ReceiveError.BadReceiver;
+        }
+        const counter = self.handshake.Shaked.receivingKeyCounter;
+        const remoteCounter = mem.readInt(u64, packet[8..16], .Little);
+        if (remoteCounter >= counter) {
+            self.handshake.Shaked.receivingKeyCounter = remoteCounter;
+        } else {
+            return ReceiveError.BadCounter;
+        }
+        _ = try utils.deaead(buf[0..packet.len-32], &self.handshake.Shaked.receivingKey, remoteCounter, packet[16..packet.len], null) catch ReceiveError.Crypto;
+        return buf[0..packet.len-32];
     }
 };
 
@@ -601,8 +633,12 @@ test "Peer can correctly handshake" {
         .initiatorPubKey = &bobKeyP.public_key,
         .initiatorPriKey = &bobKeyP.secret_key,
     });
-    try t.expectEqualStrings(&alice.handshake.Shaked.sendingKey, &bob.handshake.Shaked.sendingKey);
-    try t.expectEqualStrings(&alice.handshake.Shaked.receivingKey, &bob.handshake.Shaked.receivingKey);
+    
+    const DATA = "Hello World, man";
+    var buf: [DATA.len+32]u8 = undefined;
+    _ = try alice.sendRaw(&buf, DATA);
+    var received = try bob.receiveRaw(&buf, &buf);
+    try t.expectEqualStrings(DATA, received);
 }
 
 pub const Interface = struct {
